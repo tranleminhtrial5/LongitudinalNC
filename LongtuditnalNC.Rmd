@@ -1,0 +1,41 @@
+---
+title: "Progressive and stable cognitive status based on bioimpedance"
+output: html_notebook
+---
+
+Progressive and stable cognitive status based on bioimpedance
+
+------------------------------------------------------------------------
+
+```{r}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(ggpubr)
+library(gtsummary)
+library(flextable)
+library(tidyverse)
+library(rstatix)
+library(ggpubr)
+library(summarytools)
+library(cowplot)
+library(patchwork)
+# --- LOAD AT START OF SESSION ---
+library(lmerTest)
+library(broom.mixed)
+library(emmeans)
+library(stringr)
+#library(lme4)
+library(sjPlot)
+
+```
+
+Required Libraries
+
+```{r}
+# Read your data
+setwd("C:/Users/admin/Documents/GitHub/LongitudinalNC") 
+df <- read.csv("Longitudinal_BIA_StableNCvsProgressiveNC.csv", 
+               header = TRUE, stringsAsFactors = FALSE, na.strings = c("", "NA"))
+
+```
