@@ -34,8 +34,8 @@ library(sjPlot)
 Required Libraries
 
 ```{r}
-# Read your data
-setwd("C:/Users/KIOM_USER/Documents/GitHub/LongitudinalNC") 
+# Read your data ( KIOM_USER or admin )
+setwd("C:/Users/admin/Documents/GitHub/LongitudinalNC") 
 df <- read.csv("Longitudinal_BIA_StableNCvsProgressiveNC.csv", 
                header = TRUE, stringsAsFactors = FALSE, na.strings = c("", "NA"))
 
@@ -183,48 +183,107 @@ df_unique_transitions <- df_long.analysis %>%
 ```
 
 ```{r}
-# Chuyển datetest sang dạng ngày đúng định dạng
-df_long.analysis <- df_long.analysis %>%
-  mutate(datetest = mdy(datetest))  # Hoặc dùng ymd() tùy định dạng gốc
+library(dplyr)
+library(lubridate)
 
-# Xác định ngày baseline (ngày sớm nhất trong bộ dữ liệu)
-baseline_date <- min(df_long.analysis$datetest, na.rm = TRUE)
+df_long.analysis <- df_overall %>%
+  drop_na() %>%
+  mutate(datetest = mdy(datetest)) %>%              # Định dạng ngày
+  group_by(USUBJID) %>%
+  arrange(datetest) %>%                             # Sắp xếp theo ngày trong từng người
+  mutate(
+    baseline_date = min(datetest, na.rm = TRUE),    # Lấy ngày đầu tiên của từng người
+    elapsed_years = as.numeric(difftime(datetest, baseline_date, units="days")) / 365.25
+  ) %>%
+  select(-baseline_date) %>%
+  ungroup()
 
-# Tạo biến elapsed_years tính khoảng cách từ baseline_date
-df_long.analysis <- df_long.analysis %>%
-  mutate(elapsed_years = as.numeric(difftime(datetest, baseline_date, units = "days")) / 365.25)
 
-estimate_ES <- function(data, variable, by, ...) {
-  # Cohen's D
-  d <- effsize::cohen.d(data[[variable]] ~ as.factor(data[[by]]), 
-                   conf.level=.95, pooled=TRUE, paired=FALSE, 
-                   hedges.correction=FALSE)
-  # Formatting statistic with CI
-  est <- style_sigfig((d$estimate))
-  ci <- style_sigfig(d$conf.int) %>% paste(collapse = ", ")
-  str_glue("{est} ({ci})")
-}
+# Kiểm tra biến elapsed_years
+summary(df_long.analysis$elapsed_years)
+head(df_long.analysis[, c("datetest","USUBJID","elapsed_years")], 200)
+```
+```{r}
+# Đọc dữ liệu gốc
+library(dplyr)
+library(ggplot2)
 
-ttest_common_variance <- function(data, variable, by, ...) {
-  data <- data[c(variable, by)] %>% dplyr::filter(complete.cases(.))
-  t.test(data[[variable]] ~ factor(data[[by]]), var.equal = TRUE, paired = FALSE) %>%
-  broom::tidy()
-}
+# Kiểm tra số lượng mẫu của từng nhóm
+table(df_long.analysis$Change_Type)
 
-# Lọc dữ liệu chỉ giữ các record baseline (< 1 năm) và chỉ lấy 2 nhóm StableCN và ProgressiveCN
-df_long.analysis.baseline <- df_long.analysis %>% 
-  filter(elapsed_years < 0.9166666) %>%   # dưới 1 năm
-  filter(Change_Type %in% c("StableCN", "ProgressiveCN")) %>%   # chỉ lấy 2 nhóm cần so sánh
-  select(Change_Type, AGE:EDUYR, gds, kdsq, sysbp, diabp, visit_count, MMSE, SNSB_attention:SNSB_frontal)
+# Kiểm tra dữ liệu của nhóm ProgressiveCN và StableCN
+summary(df_long.analysis$Change_Type)
 
-# Tóm tắt dữ liệu theo Change_Type (thay vì Group)
-tbl_summary(data= df_long.analysis.baseline,
-   by = Change_Type,
-    statistic = list(all_continuous() ~ "{mean} ({sd})",
-                     all_categorical() ~ "{n} / {N} ({p}%)"),
+# Kiểm tra xem còn bao nhiêu mẫu sau lọc theo thời gian
+df_filtered <- df_long.analysis %>%
+  filter(elapsed_years < 0.9166666)
+
+table(df_filtered$Change_Type)
+
+# Kiểm tra dữ liệu bị loại trừ
+sum(is.na(df_filtered))
+
+
+```
+
+```{r}
+library(dplyr)
+library(gtsummary)
+library(broom)
+library(magrittr) # for %>%
+library(stringr)
+library(glue)
+
+# Chuẩn bị dữ liệu baseline <1 năm, nhóm StableCN, ProgressiveCN
+df_long.analysis.baseline <- df_long.analysis %>%
+  filter(elapsed_years < 0.9166666) %>%
+  filter(Change_Type %in% c("StableCN", "ProgressiveCN")) %>%
+  select(Change_Type, AGE:EDUYR, gds, kdsq, sysbp, diabp, visit_count, MMSE, SNSB_attention:SNSB_frontal) %>%
+  mutate(across(where(is.factor), as.character)) %>%       # chuyển factor -> character
+  mutate(across(c(AGE:EDUYR, gds, kdsq, sysbp, diabp, visit_count, MMSE, SNSB_attention:SNSB_frontal), as.numeric)) # chuyển character -> numeric
+
+# Tách MMSE ra xử lý riêng: tính mean, sd, t-test so sánh 2 nhóm
+df_mmse <- df_long.analysis.baseline %>%
+  select(Change_Type, MMSE) %>%
+  filter(!is.na(MMSE))
+
+summary_mmse <- df_mmse %>%
+  group_by(Change_Type) %>%
+  summarise(
+    Mean = mean(MMSE, na.rm = TRUE),
+    SD = sd(MMSE, na.rm = TRUE),
+    N = n()
+  )
+
+ttest_mmse <- t.test(MMSE ~ Change_Type, data = df_mmse, var.equal = FALSE)
+
+# Dữ liệu còn lại loại bỏ MMSE để làm tbl_summary thường
+df_without_mmse <- df_long.analysis.baseline %>%
+  select(-MMSE)
+
+tbl_summary_obj <- df_without_mmse %>%
+  tbl_summary(
+    by = Change_Type,
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})",
+      all_categorical() ~ "{n} / {N} ({p}%)"
+    ),
     digits = all_continuous() ~ 2,
     missing_text = "(Missing)"
-  ) %>% bold_labels() %>% add_p() %>% bold_p(0.05) %>% as_flex_table()
+  ) %>%
+  bold_labels() %>%
+  add_p() %>%
+  bold_p(0.05)
+
+# Xuất Table 1 hoàn chỉnh:
+# 1) In tóm tắt MMSE riêng kèm p-value t-test
+print(summary_mmse)
+cat("P-value so sánh MMSE (Welch's t-test): ", signif(ttest_mmse$p.value, 3), "\n\n")
+
+# 2) In bảng các biến còn lại
+tbl_summary_obj %>% as_flex_table()
+
+
 ```
 
 ```{r}
