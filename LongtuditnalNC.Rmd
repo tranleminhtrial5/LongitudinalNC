@@ -1,9 +1,9 @@
 ---
-title: "Progressive and stable cognitive status based on bioimpedance"
+title: "Longitudinal trajectories of segmental bioimpedance and cognitive conversion in older adults"
 output: html_notebook
 ---
 
-Progressive and stable cognitive status based on bioimpedance
+Longitudinal trajectories of segmental bioimpedance and cognitive conversion in older adults
 
 ------------------------------------------------------------------------
 
@@ -20,21 +20,24 @@ library(ggpubr)
 library(summarytools)
 library(cowplot)
 library(patchwork)
-# --- LOAD AT START OF SESSION ---
 library(lmerTest)
 library(broom.mixed)
 library(emmeans)
 library(stringr)
-#library(lme4)
+library(lme4)
 library(sjPlot)
-
+library(tibble)
+library(readr)   
+library(lubridate)
+library(broom)
+library(effectsize)
 ```
 
 Required Libraries
 
 ```{r}
 # Read your data ( KIOM_USER or admin )
-setwd("C:/Users/KIOM_USER/Documents/GitHub/LongitudinalNC") 
+setwd("C:/Users/admin/Documents/GitHub/LongitudinalNC") 
 df <- read.csv("Longitudinal_BIA_StableNCvsProgressiveNC.csv", 
                header = TRUE, stringsAsFactors = FALSE, na.strings = c("", "NA"))
 
@@ -47,7 +50,6 @@ df <- df %>% add_count(USUBJID, name = "visit_count")
 view(dfSummary(df ))
 
 #get Empty COGNIVESTATE per year
-#In the subsequent analysis
 df %>%
   group_by(year) %>%
   summarise(empty_or_na_COGNIVESTATE = sum(is.na(COGNITIVESTAT) | COGNITIVESTAT == "")) %>%
@@ -88,8 +90,6 @@ df.long_multi <- df.long %>%
 #df_demo <- df.long_multi %>% select( Group, SEX:EDUYR, MMSE,AGE) 
 view(dfSummary(df.long_multi ))
 ```
-
-
 ```{r}
 #ONly take note of inital and final transitions
 df_overall <- df.long_multi %>%
@@ -116,7 +116,6 @@ df_overall <- df.long_multi %>%
 ) %>%
 
   ungroup()
-
 
 view(dfSummary(df_overall )) 
 
@@ -177,51 +176,19 @@ view(dfSummary(df.long_multi ))
 ```
 
 ```{r}
-library(dplyr)
-library(lubridate)
-
 df_long.analysis <- df_overall %>%
   drop_na() %>%
-  mutate(datetest = mdy(datetest)) %>%              # Định dạng ngày
+  mutate(datetest = mdy(datetest)) %>%              
   group_by(USUBJID) %>%
-  arrange(datetest) %>%                             # Sắp xếp theo ngày trong từng người
+  arrange(datetest) %>%                             
   mutate(
-    baseline_date = min(datetest, na.rm = TRUE),    # Lấy ngày đầu tiên của từng người
+    baseline_date = min(datetest, na.rm = TRUE),
     elapsed_years = as.numeric(difftime(datetest, baseline_date, units="days")) / 365.25
   ) %>%
   select(-baseline_date) %>%
   ungroup()
 
-# Kiểm tra biến elapsed_years
-summary(df_long.analysis$elapsed_years)
-head(df_long.analysis[, c("datetest","USUBJID","elapsed_years")], 200)
-
-# Check initial structure of variables
-str(df_long.analysis[, c("AGE", "gds", "kdsq", "sysbp", "diabp", "bmr", "MMSE")])
-
-# Convert specified variables to numeric (handling factors if any)
-vars_to_convert <- c("AGE", "gds", "kdsq", "sysbp", "diabp", "bmr", "MMSE")
-
-df_long.analysis <- df_long.analysis %>%
-  mutate(across(all_of(vars_to_convert), ~ as.numeric(as.character(.))))
-
-# Check structure after conversion
-str(df_long.analysis[, vars_to_convert])
-
-# Optional: summary statistics to verify numeric conversion
-summary(df_long.analysis[, vars_to_convert])
-
-#df_demo <- df.long_multi %>% select( Group, SEX:EDUYR, MMSE,AGE) 
-view(dfSummary(df_long.analysis ))
-```
-
-
-```{r}
-library(dplyr)
-library(gtsummary)
-library(readr)   # parse_number để làm sạch numeric an toàn
-
-# Hàm làm sạch numeric an toàn
+# 0) Safe numeric cleaner
 clean_numeric <- function(x) {
   if (is.numeric(x)) return(x)
   x <- as.character(x)
@@ -230,32 +197,151 @@ clean_numeric <- function(x) {
   suppressWarnings(readr::parse_number(x))
 }
 
-# 1) Lấy baseline: dòng đầu tiên theo thời gian cho mỗi USUBJID
-df_long.analysis.baseline <- df_long.analysis %>%
-  group_by(USUBJID) %>%
-  arrange(datetest, .by_group = TRUE) %>%   # sắp xếp theo ngày khám trong từng người
-  slice_head(n = 1) %>%                     # lấy đúng 1 dòng baseline/đối tượng
-  ungroup() %>%
-  filter(Change_Type %in% c("StableCN", "ProgressiveCN")) %>%
-  # 2) Chỉ giữ các biến yêu cầu cho Table 1 (không đưa cột Date vào)
-  select(
-    Change_Type,
-    AGE:EDUYR,
-    gds, kdsq, sysbp, diabp, visit_count, MMSE,
-    SNSB_attention:SNSB_frontal
-  ) %>%
-  # 3) Chuẩn hóa kiểu dữ liệu: chỉ các cột khác Change_Type được làm sạch numeric
+# 1) Shapiro-gated test: return one-row tibble with p.value, method, and per-group Shapiro p
+cont_test_sw <- function(data, variable, by, ...) {
+  d <- data |>
+    dplyr::select(all_of(c(variable, by))) |>
+    tidyr::drop_na()
+
+  if (!is.factor(d[[by]])) d[[by]] <- factor(d[[by]])
+
+  # If not exactly 2 groups or too few obs in any group -> Wilcoxon
+  if (nlevels(d[[by]]) != 2L || any(table(d[[by]]) < 2L)) {
+    res <- suppressWarnings(stats::wilcox.test(as.formula(paste(variable, "~", by)),
+                                               data = d, exact = FALSE))
+    return(tibble(
+      p.value = res$p.value,
+      method  = "Wilcoxon rank-sum (insufficient groups/n)"
+    ))
+  }
+
+  # Shapiro-Wilk per group with size bounds
+  sw_list <- tapply(d[[variable]], d[[by]], function(v) {
+    v <- v[is.finite(v)]
+    n <- length(v)
+    if (n < 3 || n > 5000) return(NA_real_)
+    suppressWarnings(stats::shapiro.test(v)$p.value)
+  })
+
+  # Prepare Shapiro columns
+  extra <- as.list(sw_list)
+  names(extra) <- paste0("shapiro_p_", names(extra))
+  normal_in_both <- all(!is.na(unlist(sw_list)) & unlist(sw_list) >= 0.05)
+
+  if (isTRUE(normal_in_both)) {
+    res <- stats::t.test(as.formula(paste(variable, "~", by)),
+                         data = d, var.equal = FALSE)
+    tibble(
+      p.value = res$p.value,
+      method  = "Welch t-test (Shapiro p>=0.05 within groups)"
+    ) |>
+      tibble::add_column(!!!extra)
+  } else {
+    res <- suppressWarnings(stats::wilcox.test(as.formula(paste(variable, "~", by)),
+                                               data = d, exact = FALSE))
+    tibble(
+      p.value = res$p.value,
+      method  = "Wilcoxon rank-sum (Shapiro non-normal in ≥1 group)"
+    ) |>
+      tibble::add_column(!!!extra)
+  }
+}
+
+# 2) Append “Test” and “Shapiro p_*” columns to table_body without join
+append_test_and_shapiro <- function(tbl) {
+  tb <- tbl$table_body
+  tr <- tbl$meta_data$test_result
+  if (is.null(tr) || length(tr) == 0) return(tbl)
+
+  # Ensure target columns exist
+  tb$Test <- NA_character_
+  # Collect all Shapiro column names present across df_result
+  sh_cols <- unique(unlist(lapply(tr, function(x) {
+    nm <- names(x$df_result)
+    nm[grepl("^shapiro_p_", nm)]
+  })))
+  for (sh in sh_cols) tb[[sh]] <- NA_real_
+
+  # Map test results in order to label rows (one p/test per variable label)
+  label_idx <- which(tb$row_type == "label")
+  n <- min(length(label_idx), length(tr))
+  for (k in seq_len(n)) {
+    i <- label_idx[k]
+    dfres <- tr[[k]]$df_result
+    if (!is.null(dfres)) {
+      if ("method" %in% names(dfres)) tb$Test[i] <- as.character(dfres$method)[1]
+      for (sh in sh_cols) {
+        if (sh %in% names(dfres)) tb[[sh]][i] <- dfres[[sh]][1]
+      }
+    }
+  }
+
+  # Assign back and add headers/format
+  tbl$table_body <- tb
+  tbl <- modify_header(tbl, Test ~ "Test")
+  if (length(sh_cols)) {
+    tbl <- modify_header(tbl, all_of(sh_cols) ~ "Shapiro p")
+    tbl <- modify_fmt_fun(tbl, columns = all_of(sh_cols),
+                          ~ style_pvalue(.x, digits = 3))
+  }
+  tbl
+}
+
+# 3) Bioimpedance list
+bioimpedance_vars <- c(
+  "bmi", "ac", "whr", "pbcm", "pbf", "bmr", "tbw_ffm",
+  "ecw_tcw", "ECW_ICW_upper", "ECW_ICW_lower",
+  "Water_Lean_upper", "Water_Lean_lower",
+  "R_upper", "R_lower", "Xc_upper", "Xc_lower",
+  "PA_upper", "PA_lower", "R_H_upper", "Xc_H_upper", "R_H_lower", "Xc_H_lower"
+)
+
+# 4) Baseline derivation
+df_baseline <- df_long.analysis |>
+  group_by(USUBJID) |>
+  arrange(datetest, .by_group = TRUE) |>
+  slice_head(n = 1) |>
+  ungroup() |>
+  filter(Change_Type %in% c("StableCN", "ProgressiveCN"))
+
+# Optional: ensure visit_count exists from examination_count
+if (!("visit_count" %in% names(df_baseline)) && ("examination_count" %in% names(df_baseline))) {
+  df_baseline <- df_baseline |> mutate(visit_count = examination_count)
+}
+
+# 5) Clinical/cognitive selection & clean
+age_idx <- match("AGE", names(df_baseline))
+edu_idx <- match("EDUYR", names(df_baseline))
+span_cols <- if (!is.na(age_idx) && !is.na(edu_idx) && age_idx <= edu_idx) {
+  names(df_baseline)[age_idx:edu_idx]
+} else character(0)
+
+cols_table1 <- c(
+  "Change_Type", span_cols,
+  "gds","kdsq","sysbp","diabp","visit_count","MMSE",
+  "SNSB_attention","SNSB_language","SNSB_visuospatial","SNSB_memory","SNSB_frontal"
+) |> unique()
+
+df_table1 <- df_baseline |>
+  select(any_of(cols_table1)) |>
   mutate(across(-Change_Type, clean_numeric))
 
-# (tuỳ chọn) xác nhận MMSE là numeric
-stopifnot(is.numeric(df_long.analysis.baseline$MMSE))
+stopifnot(is.numeric(df_table1$MMSE))
 
-# 4) Tạo Table 1: hiển thị mean (sd) cho biến liên tục, ép MMSE là continuous
-tbl_summary_obj <- df_long.analysis.baseline %>%
+# 6) Bioimpedance selection & clean
+df_bia <- df_baseline |>
+  select(Change_Type, any_of(bioimpedance_vars)) |>
+  mutate(across(-Change_Type, clean_numeric))
+
+# 7) Tables with Shapiro→test, then append visible Test & Shapiro columns
+# Note: If visit_count là đo lường liên tục, có thể ép continuous trong 'type' để tránh Chi-square.
+tbl_table1 <- df_table1 |>
   tbl_summary(
     by = Change_Type,
     type = list(
-      MMSE ~ "continuous"                 # đảm bảo MMSE hiển thị như biến liên tục
+      all_continuous() ~ "continuous",
+      MMSE ~ "continuous"
+      # , visit_count ~ "continuous"  # bật nếu muốn so sánh liên tục
     ),
     statistic = list(
       all_continuous() ~ "{mean} ({sd})",
@@ -263,80 +349,172 @@ tbl_summary_obj <- df_long.analysis.baseline %>%
     ),
     digits = all_continuous() ~ 2,
     missing_text = "(Missing)"
-  ) %>%
+  ) |>
   add_p(
     test = list(
-      all_continuous() ~ "t.test",
+      all_continuous() ~ cont_test_sw,
+      # visit_count ~ "fisher.test",  # cân nhắc nếu giữ phân loại và tần số thấp
       all_categorical() ~ "chisq.test"
-    ),
-    test.args = all_tests("t.test") ~ list(var.equal = FALSE)  # Welch's t-test
-  ) %>%
-  bold_labels() %>%
-  bold_p(0.05)
+    )
+  ) |>
+  bold_labels() |>
+  bold_p(t = 0.05)
 
-# 5) Xuất bảng
-tbl_summary_obj %>% as_flex_table()
+tbl_table1 <- append_test_and_shapiro(tbl_table1)
 
-
-```
-
-```{r}
-library(dplyr)
-library(gtsummary)
-library(readr)
-
-# Clean numeric
-clean_numeric <- function(x) {
-  if (is.numeric(x)) return(x)
-  x <- as.character(x)
-  x <- trimws(x)
-  x[x == ""] <- NA
-  suppressWarnings(readr::parse_number(x))
-}
-
-bioimpedance_vars <- c(
-  "bmi", "ac", "whr", "pbcm", "pbf", "bmr", "tbw_ffm", 
-  "ecw_tcw", "ECW_ICW_upper", "ECW_ICW_lower", 
-  "Water_Lean_upper", "Water_Lean_lower", 
-  "R_upper", "R_lower", "Xc_upper", "Xc_lower", 
-  "PA_upper", "PA_lower"
-)
-
-# 1) Lấy baseline: dòng đầu tiên theo thời gian cho mỗi USUBJID
-df_baseline_bia <- df_long.analysis %>%
-  group_by(USUBJID) %>%
-  arrange(datetest, .by_group = TRUE) %>%
-  slice_head(n = 1) %>%
-  ungroup() %>%
-  filter(Change_Type %in% c("StableCN", "ProgressiveCN")) %>%
-  # 2) CHỈ giữ Change_Type và các biến bioimpedance
-  select(Change_Type, all_of(bioimpedance_vars)) %>%
-  # 3) Làm sạch và chuyển đổi sang numeric
-  mutate(across(-Change_Type, clean_numeric))
-
-# 4) Tạo Table với t-test chỉ cho các biến bioimpedance
-tbl_bia_comparison <- df_baseline_bia %>%
+tbl_bia <- df_bia |>
   tbl_summary(
     by = Change_Type,
     type = all_continuous() ~ "continuous",
     statistic = all_continuous() ~ "{mean} ({sd})",
     digits = all_continuous() ~ 2,
     missing_text = "(Missing)"
-  ) %>%
-  add_p(
-    test = all_continuous() ~ "t.test",
-    test.args = list(var.equal = FALSE)  # Welch's t-test
-  ) %>%
-  bold_labels() %>%
-  bold_p(0.05)
+  ) |>
+  add_p(test = all_continuous() ~ cont_test_sw) |>
+  bold_labels() |>
+  bold_p(t = 0.05)
 
-# 5) Hiển thị bảng
-tbl_bia_comparison
+tbl_bia <- append_test_and_shapiro(tbl_bia)
 
-# 6) Xuất bảng dưới dạng flextable
-ft_bia <- tbl_bia_comparison %>% as_flex_table()
+# 8) Export to flextable
+ft_table1 <- tbl_table1 |> as_flex_table()
+ft_bia    <- tbl_bia    |> as_flex_table()
+
+# Print (optional)
+ft_table1
 ft_bia
+
+```
+
+```{r}
+
+# Chuẩn hóa dữ liệu - ép numeric
+numeric_vars <- c("height","weight","bmi","whr","pbcm","pbf","bmr","ecw_tcw","tbw_ffm",
+                  "ECW_ICW_upper","ECW_ICW_lower","Water_Lean_upper","Water_Lean_lower",
+                  "R_upper","R_lower","Xc_upper","Xc_lower","PA_upper","PA_lower",
+                  "R_H_upper","R_H_lower","Xc_H_upper","Xc_H_lower")
+for (v in numeric_vars) if (v %in% names(df_baseline)) df_baseline[[v]] <- as.numeric(df_baseline[[v]])
+
+vars_table2 <- intersect(c("height", "weight", "bmi", "whr", "pbcm", "pbf", "bmr", "ecw_tcw", "tbw_ffm"), names(df_baseline))
+vars_table3 <- intersect(c("ECW_ICW_upper", "ECW_ICW_lower", "Water_Lean_upper", "Water_Lean_lower",
+  "R_upper","R_lower","Xc_upper","Xc_lower","PA_upper","PA_lower",
+  "R_H_upper","R_H_lower","Xc_H_upper","Xc_H_lower"), names(df_baseline))
+covariates <- intersect(c("AGE", "SEX", "EDUYR"), names(df_baseline))
+
+make_compare_table <- function(df, var, covars, group = "Change_Type") {
+  if (!is.numeric(df[[var]])) return(NULL)
+  # Model cho effect size & marginal means
+  model <- lm(as.formula(paste(var, "~", group, "+", paste(covars, collapse = "+"))), data = df)
+  emm <- suppressMessages(emmeans(model, specs = group))
+  pair <- pairs(emm, adjust = "tukey")
+  pair_df <- as.data.frame(pair)
+  eff <- NA
+  try({ eff <- effectsize::hedges_g(model, var = group)[1,"Hedges_g"] }, silent = TRUE)
+  means <- df %>%
+    group_by(.data[[group]]) %>%
+    summarise(
+      N = sum(!is.na(.data[[var]])),
+      Mean = mean(.data[[var]], na.rm = TRUE),
+      SD = sd(.data[[var]], na.rm = TRUE)
+    ) %>%
+    arrange(match(.data[[group]], levels(df[[group]])))
+  # Lấy dòng p-value so sánh ProgressiveCN - StableCN
+  out <- tibble::tibble(
+    Variable = var,
+    N_StableCN = means$N[1],
+    N_ProgressiveCN = means$N[2],
+    Mean_StableCN = means$Mean[1],
+    Mean_ProgressiveCN = means$Mean[2],
+    SD_StableCN = means$SD[1],
+    SD_ProgressiveCN = means$SD[2],
+    Mean_Diff = pair_df$estimate[1],
+    CI_lower = pair_df$lower.CL[1],
+    CI_upper = pair_df$upper.CL[1],
+    p.value = pair_df$p.value[1],
+    Hedges_g = eff
+  )
+  out
+}
+
+table2 <- do.call(rbind, lapply(vars_table2, function(x) make_compare_table(df_baseline, x, covariates)))
+table3 <- do.call(rbind, lapply(vars_table3, function(x) make_compare_table(df_baseline, x, covariates)))
+
+table2_ft <- flextable(table2) %>%
+  bold(j = "p.value", i = ~ p.value < 0.05) %>%
+  autofit()
+table3_ft <- flextable(table3) %>%
+  bold(j = "p.value", i = ~ p.value < 0.05) %>%
+  autofit()
+
+table2_ft
+table3_ft
 
 
 ```
 
+```{r}
+library(dplyr)
+library(emmeans)
+library(broom)
+library(flextable)
+library(effectsize)
+
+# Chuẩn hóa dữ liệu - ép numeric
+numeric_vars <- c("height","weight","bmi","whr","pbcm","pbf","bmr","ecw_tcw","tbw_ffm",
+                  "ECW_ICW_upper","ECW_ICW_lower","Water_Lean_upper","Water_Lean_lower",
+                  "R_upper","R_lower","Xc_upper","Xc_lower","PA_upper","PA_lower",
+                  "R_H_upper","R_H_lower","Xc_H_upper","Xc_H_lower", "gds")
+for (v in numeric_vars) if (v %in% names(df_baseline)) df_baseline[[v]] <- as.numeric(df_baseline[[v]])
+
+vars_table2 <- intersect(c("height", "weight", "bmi", "whr", "pbcm", "pbf", "bmr", "ecw_tcw", "tbw_ffm"), names(df_baseline))
+vars_table3 <- intersect(c("ECW_ICW_upper", "ECW_ICW_lower", "Water_Lean_upper", "Water_Lean_lower",
+  "R_upper","R_lower","Xc_upper","Xc_lower","PA_upper","PA_lower",
+  "R_H_upper","R_H_lower","Xc_H_upper","Xc_H_lower"), names(df_baseline))
+covariates <- intersect(c("AGE", "SEX", "EDUYR", "gds"), names(df_baseline))
+
+make_compare_table <- function(df, var, covars, group = "Change_Type") {
+  if (!is.numeric(df[[var]])) return(NULL)
+  model <- lm(as.formula(paste(var, "~", group, "+", paste(covars, collapse = "+"))), data = df)
+  emm <- suppressMessages(emmeans(model, specs = group))
+  pair <- pairs(emm, adjust = "tukey")
+  pair_df <- as.data.frame(pair)
+  eff <- NA
+  try({ eff <- effectsize::hedges_g(model, var = group)[1,"Hedges_g"] }, silent = TRUE)
+  means <- df %>%
+    group_by(.data[[group]]) %>%
+    summarise(
+      N = sum(!is.na(.data[[var]])),
+      Mean = mean(.data[[var]], na.rm = TRUE),
+      SD = sd(.data[[var]], na.rm = TRUE)
+    ) %>%
+    arrange(match(.data[[group]], levels(df[[group]])))
+  out <- tibble::tibble(
+    Variable = var,
+    N_StableCN = means$N[1],
+    N_ProgressiveCN = means$N[2],
+    Mean_StableCN = means$Mean[1],
+    Mean_ProgressiveCN = means$Mean[2],
+    SD_StableCN = means$SD[1],
+    SD_ProgressiveCN = means$SD[2],
+    Mean_Diff = pair_df$estimate[1],
+    CI_lower = pair_df$lower.CL[1],
+    CI_upper = pair_df$upper.CL[1],
+    p.value = pair_df$p.value[1],
+    Hedges_g = eff
+  )
+  out
+}
+
+table2 <- do.call(rbind, lapply(vars_table2, function(x) make_compare_table(df_baseline, x, covariates)))
+table3 <- do.call(rbind, lapply(vars_table3, function(x) make_compare_table(df_baseline, x, covariates)))
+
+table2_ft <- flextable(table2) %>%
+  bold(j = "p.value", i = ~ p.value < 0.05) %>%
+  autofit()
+table3_ft <- flextable(table3) %>%
+  bold(j = "p.value", i = ~ p.value < 0.05) %>%
+  autofit()
+
+table2_ft
+table3_ft
+```
