@@ -203,28 +203,7 @@ df_long.analysis <- df_overall %>%
 summary(df_long.analysis$elapsed_years)
 head(df_long.analysis[, c("datetest","USUBJID","elapsed_years")], 200)
 ```
-```{r}
-# Đọc dữ liệu gốc
-library(dplyr)
-library(ggplot2)
 
-# Kiểm tra số lượng mẫu của từng nhóm
-table(df_long.analysis$Change_Type)
-
-# Kiểm tra dữ liệu của nhóm ProgressiveCN và StableCN
-summary(df_long.analysis$Change_Type)
-
-# Kiểm tra xem còn bao nhiêu mẫu sau lọc theo thời gian
-df_filtered <- df_long.analysis %>%
-  filter(elapsed_years < 0.9166666)
-
-table(df_filtered$Change_Type)
-
-# Kiểm tra dữ liệu bị loại trừ
-sum(is.na(df_filtered))
-
-
-```
 
 ```{r}
 library(dplyr)
