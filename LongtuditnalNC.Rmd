@@ -290,7 +290,7 @@ append_test_and_shapiro <- function(tbl) {
 # 3) Bioimpedance list
 bioimpedance_vars <- c(
   "bmi", "ac", "whr", "pbcm", "pbf", "bmr", "tbw_ffm",
-  "ecw_tcw", "ECW_ICW_upper", "ECW_ICW_lower",
+  "ecw_tcw", "PA50_total", "ECW_ICW_upper", "PA50_total", "ECW_ICW_lower",
   "Water_Lean_upper", "Water_Lean_lower",
   "R_upper", "R_lower", "Xc_upper", "Xc_lower",
   "PA_upper", "PA_lower", "R_H_upper", "Xc_H_upper", "R_H_lower", "Xc_H_lower"
@@ -389,13 +389,13 @@ ft_bia
 ```{r}
 
 # Chuẩn hóa dữ liệu - ép numeric
-numeric_vars <- c("height","weight","bmi","whr","pbcm","pbf","bmr","ecw_tcw","tbw_ffm",
+numeric_vars <- c("height","weight","bmi","whr","pbcm","pbf","bmr","ecw_tcw","PA50_total","tbw_ffm",
                   "ECW_ICW_upper","ECW_ICW_lower","Water_Lean_upper","Water_Lean_lower",
                   "R_upper","R_lower","Xc_upper","Xc_lower","PA_upper","PA_lower",
                   "R_H_upper","R_H_lower","Xc_H_upper","Xc_H_lower")
 for (v in numeric_vars) if (v %in% names(df_baseline)) df_baseline[[v]] <- as.numeric(df_baseline[[v]])
 
-vars_table2 <- intersect(c("height", "weight", "bmi", "whr", "pbcm", "pbf", "bmr", "ecw_tcw", "tbw_ffm"), names(df_baseline))
+vars_table2 <- intersect(c("height", "weight", "bmi", "whr", "pbcm", "pbf", "bmr","PA50_total", "ecw_tcw", "PA50_total", "tbw_ffm"), names(df_baseline))
 vars_table3 <- intersect(c("ECW_ICW_upper", "ECW_ICW_lower", "Water_Lean_upper", "Water_Lean_lower",
   "R_upper","R_lower","Xc_upper","Xc_lower","PA_upper","PA_lower",
   "R_H_upper","R_H_lower","Xc_H_upper","Xc_H_lower"), names(df_baseline))
@@ -421,8 +421,6 @@ make_compare_table <- function(df, var, covars, group = "Change_Type") {
   # Lấy dòng p-value so sánh ProgressiveCN - StableCN
   out <- tibble::tibble(
     Variable = var,
-    N_StableCN = means$N[1],
-    N_ProgressiveCN = means$N[2],
     Mean_StableCN = means$Mean[1],
     Mean_ProgressiveCN = means$Mean[2],
     SD_StableCN = means$SD[1],
@@ -453,20 +451,14 @@ table3_ft
 ```
 
 ```{r}
-library(dplyr)
-library(emmeans)
-library(broom)
-library(flextable)
-library(effectsize)
-
 # Chuẩn hóa dữ liệu - ép numeric
-numeric_vars <- c("height","weight","bmi","whr","pbcm","pbf","bmr","ecw_tcw","tbw_ffm",
+numeric_vars <- c("height","weight","bmi","whr","pbcm","pbf","bmr","ecw_tcw","PA50_total","tbw_ffm",
                   "ECW_ICW_upper","ECW_ICW_lower","Water_Lean_upper","Water_Lean_lower",
                   "R_upper","R_lower","Xc_upper","Xc_lower","PA_upper","PA_lower",
                   "R_H_upper","R_H_lower","Xc_H_upper","Xc_H_lower", "gds")
 for (v in numeric_vars) if (v %in% names(df_baseline)) df_baseline[[v]] <- as.numeric(df_baseline[[v]])
 
-vars_table2 <- intersect(c("height", "weight", "bmi", "whr", "pbcm", "pbf", "bmr", "ecw_tcw", "tbw_ffm"), names(df_baseline))
+vars_table2 <- intersect(c("height", "weight", "bmi", "whr", "pbcm", "pbf", "bmr", "ecw_tcw","PA50_total", "tbw_ffm"), names(df_baseline))
 vars_table3 <- intersect(c("ECW_ICW_upper", "ECW_ICW_lower", "Water_Lean_upper", "Water_Lean_lower",
   "R_upper","R_lower","Xc_upper","Xc_lower","PA_upper","PA_lower",
   "R_H_upper","R_H_lower","Xc_H_upper","Xc_H_lower"), names(df_baseline))
@@ -490,8 +482,6 @@ make_compare_table <- function(df, var, covars, group = "Change_Type") {
     arrange(match(.data[[group]], levels(df[[group]])))
   out <- tibble::tibble(
     Variable = var,
-    N_StableCN = means$N[1],
-    N_ProgressiveCN = means$N[2],
     Mean_StableCN = means$Mean[1],
     Mean_ProgressiveCN = means$Mean[2],
     SD_StableCN = means$SD[1],
