@@ -37,7 +37,7 @@ Required Libraries
 
 ```{r}
 # Read your data ( KIOM_USER or admin )
-setwd("C:/Users/KIOM_USER/Documents/GitHub/LongitudinalNC") 
+setwd("C:/Users/admin/Documents/GitHub/LongitudinalNC") 
 df <- read.csv("Longitudinal_BIA_StableNCvsProgressiveNC.csv", 
                header = TRUE, stringsAsFactors = FALSE, na.strings = c("", "NA"))
 
@@ -386,118 +386,71 @@ ft_bia
 
 ```
 
-```{r}
-
-# Chuẩn hóa dữ liệu - ép numeric
-numeric_vars <- c("height","weight","bmi","whr","pbcm","pbf","bmr","ecw_tcw","PA50_total","tbw_ffm",
-                  "ECW_ICW_upper","ECW_ICW_lower","Water_Lean_upper","Water_Lean_lower",
-                  "R_upper","R_lower","Xc_upper","Xc_lower","PA_upper","PA_lower",
-                  "R_H_upper","R_H_lower","Xc_H_upper","Xc_H_lower")
-for (v in numeric_vars) if (v %in% names(df_baseline)) df_baseline[[v]] <- as.numeric(df_baseline[[v]])
-
-vars_table2 <- intersect(c("height", "weight", "bmi", "whr", "pbcm", "pbf", "bmr","PA50_total", "ecw_tcw", "PA50_total", "tbw_ffm"), names(df_baseline))
-vars_table3 <- intersect(c("ECW_ICW_upper", "ECW_ICW_lower", "Water_Lean_upper", "Water_Lean_lower",
-  "R_upper","R_lower","Xc_upper","Xc_lower","PA_upper","PA_lower",
-  "R_H_upper","R_H_lower","Xc_H_upper","Xc_H_lower"), names(df_baseline))
-covariates <- intersect(c("AGE", "SEX", "EDUYR"), names(df_baseline))
-
-make_compare_table <- function(df, var, covars, group = "Change_Type") {
-  if (!is.numeric(df[[var]])) return(NULL)
-  # Model cho effect size & marginal means
-  model <- lm(as.formula(paste(var, "~", group, "+", paste(covars, collapse = "+"))), data = df)
-  emm <- suppressMessages(emmeans(model, specs = group))
-  pair <- pairs(emm, adjust = "tukey")
-  pair_df <- as.data.frame(pair)
-  eff <- NA
-  try({ eff <- effectsize::hedges_g(model, var = group)[1,"Hedges_g"] }, silent = TRUE)
-  means <- df %>%
-    group_by(.data[[group]]) %>%
-    summarise(
-      N = sum(!is.na(.data[[var]])),
-      Mean = mean(.data[[var]], na.rm = TRUE),
-      SD = sd(.data[[var]], na.rm = TRUE)
-    ) %>%
-    arrange(match(.data[[group]], levels(df[[group]])))
-  # Lấy dòng p-value so sánh ProgressiveCN - StableCN
-  out <- tibble::tibble(
-    Variable = var,
-    Mean_StableCN = means$Mean[1],
-    Mean_ProgressiveCN = means$Mean[2],
-    SD_StableCN = means$SD[1],
-    SD_ProgressiveCN = means$SD[2],
-    Mean_Diff = pair_df$estimate[1],
-    CI_lower = pair_df$lower.CL[1],
-    CI_upper = pair_df$upper.CL[1],
-    p.value = pair_df$p.value[1],
-    Hedges_g = eff
-  )
-  out
-}
-
-table2 <- do.call(rbind, lapply(vars_table2, function(x) make_compare_table(df_baseline, x, covariates)))
-table3 <- do.call(rbind, lapply(vars_table3, function(x) make_compare_table(df_baseline, x, covariates)))
-
-table2_ft <- flextable(table2) %>%
-  bold(j = "p.value", i = ~ p.value < 0.05) %>%
-  autofit()
-table3_ft <- flextable(table3) %>%
-  bold(j = "p.value", i = ~ p.value < 0.05) %>%
-  autofit()
-
-table2_ft
-table3_ft
-
-
-```
 
 ```{r}
-# Chuẩn hóa dữ liệu - ép numeric
+# Ensure numeric variables are numeric
 numeric_vars <- c("height","weight","bmi","whr","pbcm","pbf","bmr","ecw_tcw","PA50_total","tbw_ffm",
                   "ECW_ICW_upper","ECW_ICW_lower","Water_Lean_upper","Water_Lean_lower",
                   "R_upper","R_lower","Xc_upper","Xc_lower","PA_upper","PA_lower",
                   "R_H_upper","R_H_lower","Xc_H_upper","Xc_H_lower", "gds")
-for (v in numeric_vars) if (v %in% names(df_baseline)) df_baseline[[v]] <- as.numeric(df_baseline[[v]])
+for (v in numeric_vars) {
+  if (v %in% names(df_baseline)) df_baseline[[v]] <- as.numeric(df_baseline[[v]])
+}
 
 vars_table2 <- intersect(c("height", "weight", "bmi", "whr", "pbcm", "pbf", "bmr", "ecw_tcw","PA50_total", "tbw_ffm"), names(df_baseline))
 vars_table3 <- intersect(c("ECW_ICW_upper", "ECW_ICW_lower", "Water_Lean_upper", "Water_Lean_lower",
-  "R_upper","R_lower","Xc_upper","Xc_lower","PA_upper","PA_lower",
-  "R_H_upper","R_H_lower","Xc_H_upper","Xc_H_lower"), names(df_baseline))
+                          "R_upper","R_lower","Xc_upper","Xc_lower","PA_upper","PA_lower",
+                          "R_H_upper","R_H_lower","Xc_H_upper","Xc_H_lower"), names(df_baseline))
 covariates <- intersect(c("AGE", "SEX", "EDUYR", "gds"), names(df_baseline))
 
+# Customized function to create comparison table with Mean (SD) format
 make_compare_table <- function(df, var, covars, group = "Change_Type") {
   if (!is.numeric(df[[var]])) return(NULL)
+  
+  # Linear model adjusting for covariates
   model <- lm(as.formula(paste(var, "~", group, "+", paste(covars, collapse = "+"))), data = df)
   emm <- suppressMessages(emmeans(model, specs = group))
   pair <- pairs(emm, adjust = "tukey")
   pair_df <- as.data.frame(pair)
+  
+  # Effect size (Hedges' g)
   eff <- NA
   try({ eff <- effectsize::hedges_g(model, var = group)[1,"Hedges_g"] }, silent = TRUE)
+  
+  # Compute group summaries (N, Mean, SD)
   means <- df %>%
     group_by(.data[[group]]) %>%
     summarise(
       N = sum(!is.na(.data[[var]])),
       Mean = mean(.data[[var]], na.rm = TRUE),
       SD = sd(.data[[var]], na.rm = TRUE)
-    ) %>%
+    ) %>% 
     arrange(match(.data[[group]], levels(df[[group]])))
+  
+  # Format Mean (SD)
+  mean_sd_1 <- sprintf("%.2f (%.2f)", means$Mean[1], means$SD[1])
+  mean_sd_2 <- sprintf("%.2f (%.2f)", means$Mean[2], means$SD[2])
+  
+  # Output table row with formatted means
   out <- tibble::tibble(
     Variable = var,
-    Mean_StableCN = means$Mean[1],
-    Mean_ProgressiveCN = means$Mean[2],
-    SD_StableCN = means$SD[1],
-    SD_ProgressiveCN = means$SD[2],
+    Mean_SD_StableCN = mean_sd_1,
+    Mean_SD_ProgressiveCN = mean_sd_2,
     Mean_Diff = pair_df$estimate[1],
     CI_lower = pair_df$lower.CL[1],
     CI_upper = pair_df$upper.CL[1],
     p.value = pair_df$p.value[1],
     Hedges_g = eff
   )
-  out
+  
+  return(out)
 }
 
+# Generate tables for the two variable groups
 table2 <- do.call(rbind, lapply(vars_table2, function(x) make_compare_table(df_baseline, x, covariates)))
 table3 <- do.call(rbind, lapply(vars_table3, function(x) make_compare_table(df_baseline, x, covariates)))
 
+# Convert to flextable with significant p-value bolded
 table2_ft <- flextable(table2) %>%
   bold(j = "p.value", i = ~ p.value < 0.05) %>%
   autofit()
@@ -505,8 +458,11 @@ table3_ft <- flextable(table3) %>%
   bold(j = "p.value", i = ~ p.value < 0.05) %>%
   autofit()
 
+# Print tables
 table2_ft
 table3_ft
+
+
 ```
 
 ```{r}
