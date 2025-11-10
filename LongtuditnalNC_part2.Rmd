@@ -1,0 +1,1061 @@
+---
+title: "Longitudinal trajectories of segmental bioimpedance and cognitive conversion in older adults - Part 1"
+output: html_notebook
+---
+
+Longitudinal trajectories of segmental bioimpedance and cognitive conversion in older adults
+
+------------------------------------------------------------------------
+
+```{r}
+# Data manipulation
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(lubridate)
+library(stringr)
+
+# Visualization
+library(ggplot2)
+library(cowplot)
+library(ggpubr)
+library(patchwork)
+library(sjPlot)
+
+# Statistical analysis
+library(lme4)
+library(lmerTest)
+library(rstatix)
+library(effectsize)
+library(emmeans)
+library(broom)
+library(broom.mixed)
+
+# Reporting
+library(gtsummary)
+library(flextable)
+library(summarytools)
+
+```
+
+Required Libraries
+
+```{r}
+# Read your data ( KIOM_USER or admin )
+setwd("C:/Users/admin/Documents/GitHub/LongitudinalNC") 
+df <- read.csv("Longitudinal_BIA_StableNCvsProgressiveNC.csv", 
+               header = TRUE, stringsAsFactors = FALSE, na.strings = c("", "NA"))
+
+df <- df %>% add_count(USUBJID, name = "visit_count")
+
+view(dfSummary(df ))
+
+df.long <- df %>% 
+   # filter(Group %in% c("CN", "MCI", "AD"), year %in% 2019:2024, r_squared >= 0.95) %>%
+  filter(Group %in% c("CN", "MCI", "AD"), year %in% 2019:2024) %>%
+  filter(!is.na(COGNITIVESTAT) & COGNITIVESTAT != "") %>% # drop NA or empty
+  filter(!COGNITIVESTAT %in% c("aMCI,Dep")) %>%
+  drop_na() %>% 
+  add_count(USUBJID, name = "visit_count") %>%
+  mutate(
+    # Treat SMI as CN
+    COGNITIVESTAT = ifelse(COGNITIVESTAT == "SMI", "CN", COGNITIVESTAT)
+  ) 
+
+# Keep only subjects with at least 2 valid records
+df.long_multi <- df.long %>%
+  group_by(USUBJID) %>%
+  filter(n() >= 2) %>%
+  ungroup()
+
+(df_changes <- df.long_multi %>%
+  arrange(USUBJID, year) %>%  # ensure chronological order
+  group_by(USUBJID) %>%
+  summarise(
+    #Status_Changed = n_distinct(COGNITIVESTAT, na.rm = TRUE) > 1,
+    Transitions = paste(COGNITIVESTAT, collapse = " -> ")
+  ))
+
+(df_summary <- df_changes %>%
+  group_by(Transitions) %>%
+  summarise(Count = n()) %>%
+  mutate( Percentage = round(Count / sum(Count) * 100, 1)) %>%
+  arrange(desc(Count)))
+
+#df_demo <- df.long_multi %>% select( Group, SEX:EDUYR, MMSE,AGE) 
+view(dfSummary(df.long_multi ))
+```
+```{r}
+#ONly take note of inital and final transitions
+df_overall <- df.long_multi %>%
+  mutate(
+    COGNITIVESTAT = case_when(
+      COGNITIVESTAT %in% c("aMCI", "naMCI") ~ "MCI",
+      COGNITIVESTAT == "SMI" ~ "CN",
+      TRUE ~ COGNITIVESTAT
+    )
+  ) %>%
+  arrange(USUBJID, year) %>%
+  group_by(USUBJID) %>%
+  mutate(
+    Initial_Status = first(COGNITIVESTAT),
+    Final_Status   = last(COGNITIVESTAT)
+  ) %>%
+  mutate(
+  Transition = paste(Initial_Status, "->", Final_Status),
+  Change_Type = case_when(
+    Initial_Status == "CN" & Final_Status == "CN" ~ "StableCN",
+    Initial_Status == "CN" & Final_Status == "MCI" ~ "ProgressiveCN",
+    TRUE ~ NA_character_
+  )
+) %>%
+
+  ungroup()
+
+view(dfSummary(df_overall )) 
+
+(df_transition_summary <- df_overall %>%
+  group_by(Transition) %>%
+  summarise(
+    Count = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Percentage = round(Count / sum(Count) * 100, 1)
+  ) %>%
+  arrange(desc(Count)))
+
+df_long.analysis <- df_overall %>%
+  drop_na() %>%
+  mutate(datetest = mdy(datetest)) %>%              
+  group_by(USUBJID) %>%
+  arrange(datetest) %>%                             
+  mutate(
+    baseline_date = min(datetest, na.rm = TRUE),
+    elapsed_years = as.numeric(difftime(datetest, baseline_date, units="days")) / 365.25
+  ) %>%
+  select(-baseline_date) %>%
+  ungroup()
+
+#get Unique Particpants for analysis
+df_unique_transitions <- df_overall %>%
+  select(USUBJID, Transition, Change_Type) %>%  # keep only relevant columns
+  distinct()  # keep only unique rows by ID, Transition, Change_Type
+
+(df_summary <- df_unique_transitions %>%
+  group_by(Transition, Change_Type) %>%
+  summarise(
+    Count = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Percentage = round(Count / sum(Count) * 100, 1)
+  ) %>%
+  arrange(desc(Count)))
+
+df_long.analysis <- df_overall  %>%  drop_na() %>% mutate_if(is.character, as.factor) %>%   droplevels() %>%
+  add_count(USUBJID, name = "visit_count") #%>% filter(Transition != "CN -> CN")
+
+# Relevel Change_Type with "Stable" as reference
+df_long.analysis$Change_Type <- relevel(factor(df_long.analysis$Change_Type), ref = "StableCN")
+
+view(dfSummary(df_long.analysis ))
+
+
+#get Unique Particpants for analysis
+df_unique_transitions <- df_long.analysis %>%
+  select(USUBJID, Transition, Change_Type) %>%  # keep only relevant columns
+  distinct()  # keep only unique rows by ID, Transition, Change_Type
+
+(df_summary <- df_unique_transitions %>%
+  group_by(Transition, Change_Type) %>%
+  summarise(
+    Count = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Percentage = round(Count / sum(Count) * 100, 1)
+  ) %>%
+  arrange(desc(Count)))
+#df_demo <- df.long_multi %>% select( Group, SEX:EDUYR, MMSE,AGE) 
+view(dfSummary(df.long_multi ))
+
+```
+
+
+
+
+```{r}
+library(lmerTest)  # load this instead of lme4 for fitted model
+
+plot_lmer_predictions_with_stats <- function(data, response = "PA_lower", 
+                                            xvar = "elapsed_years", groupvar = "Group",
+                                            covariates = c("AGE", "SEX", "EDUYR"),
+                                            n_points = 100) {
+  # Fit the model with lmerTest to get p-values
+  formula_str <- paste0(response, " ~ ", xvar, "*", groupvar, " + ",
+                        paste(covariates, collapse = " + "), " + (1 + ", xvar, " | USUBJID)")
+  mod <- lmer(as.formula(formula_str), data = data)
+  
+  # Create prediction data
+  newdata <- expand.grid(
+    elapsed_years = seq(min(data[[xvar]], na.rm = TRUE), max(data[[xvar]], na.rm = TRUE), length.out = n_points),
+    Group = unique(data[[groupvar]])
+  )
+  for (cov in covariates) {
+    if (is.numeric(data[[cov]])) {
+      newdata[[cov]] <- median(data[[cov]], na.rm = TRUE)
+    } else if (is.factor(data[[cov]])) {
+      newdata[[cov]] <- levels(data[[cov]])[1]
+    }
+  }
+  
+  # Predict fixed effects
+  newdata$predicted <- predict(mod, newdata = newdata, re.form = NA)
+  
+  # Extract coefficients with p-values
+  fixef_summary <- summary(mod)$coefficients
+  fixef_df <- as.data.frame(fixef_summary)
+  fixef_df$Term <- rownames(fixef_df)
+  
+  sig_stars <- function(p) {
+    if (p < 0.001) "***" else if (p < 0.01) "**" else if (p < 0.05) "*" else ""
+  }
+  fixef_df$stars <- sapply(fixef_df$`Pr(>|t|)`, sig_stars)
+  fixef_df$label <- paste0(fixef_df$Term, ": ", round(fixef_df$Estimate, 3), " ", fixef_df$stars)
+  print(fixef_df)
+  y_top <- max(newdata$predicted, na.rm = TRUE)
+  y_spacing <- (y_top - min(newdata$predicted, na.rm = TRUE)) * 0.05
+  y_positions <- seq(y_top, y_top - y_spacing * (nrow(fixef_df) - 1), length.out = nrow(fixef_df))
+  annot_df <- data.frame(
+    x = rep(min(newdata[[xvar]]), nrow(fixef_df)),
+    y = y_positions,
+    label = fixef_df$label
+  )
+  
+  p <- ggplot(newdata, aes_string(x = xvar, y = "predicted", color = groupvar)) +
+    geom_line(size = 1.2) +
+    geom_text(data = annot_df, aes(x = x, y = y, label = label), hjust = 0, size = 3, inherit.aes = FALSE) +
+    labs(title = paste("Predicted", response, "Trajectories by", groupvar),
+         x = xvar,
+         y = paste("Predicted", response)) +
+    theme_minimal()
+  
+  print(summary(mod))
+  
+  return(p)
+}
+
+
+
+plot_lmer_predictions_with_stats(df_long.analysis, response="PA_upper")
+```
+
+```{r}
+library(lmerTest)
+# Fit random intercept and slope LME model
+mod <- lmer(whr ~ elapsed_years*Change_Type  + AGE + SEX + EDUYR  + (1 + elapsed_years| USUBJID), data = df_long.analysis, REML = TRUE)
+summary(mod)
+```
+
+```{r}
+library(emmeans)
+library(broom.mixed)
+
+analyze_longitudinal_trends <- function(data, 
+                                        response = "bmi",
+                                        xvar = "elapsed_years", 
+                                        groupvar = "Group",
+                                        covariates = c("AGE", "SEX", "EDUYR"),
+                                        subject_id = "USUBJID",
+                                        time_points_input = c(0,1,2,3,4,5,6),
+                                        reference_group = NULL,
+                                        comparison_groups = NULL) {
+  # Ensure groupvar is factor
+  if(!is.factor(data[[groupvar]])) {
+    data[[groupvar]] <- as.factor(data[[groupvar]])
+  }
+  
+  # Set reference group to first level if NULL
+  group_levels <- levels(data[[groupvar]])
+  if(is.null(reference_group)) reference_group <- group_levels[1]
+  # Set comparison groups to all others except reference if NULL
+  if(is.null(comparison_groups)) comparison_groups <- setdiff(group_levels, reference_group)
+  
+  # Validate that specified groups exist
+  if(!(reference_group %in% group_levels)) stop("Reference group not in groupvar levels")
+  if(!all(comparison_groups %in% group_levels)) stop("Some comparison groups not in groupvar levels")
+  
+  # Linear mixed model formula
+  fixed_effects <- paste0(xvar, "*", groupvar, " + ", paste(covariates, collapse = " + "))
+  random_effects <- paste0("(1 + ", xvar, " | ", subject_id, ")")
+  formula_str <- paste0(response, " ~ ", fixed_effects, " + ", random_effects)
+  
+  # Fit model
+  mod <- lmer(as.formula(formula_str), data = data)
+  
+  
+  # Residual SD (for Cohen's d)
+  sigma_resid <- sigma(mod)
+  
+  emt <- emtrends(mod, specs = groupvar, var = xvar)
+  
+  summary_emt <- summary(emt, infer = TRUE)
+ 
+  
+  trend_col <- grep("\\.trend$", colnames(summary_emt), value = TRUE)
+  if(length(trend_col) != 1) stop("Unexpected number of trend columns in emtrends output")
+  
+  contrasts_df <- contrast(emt, method = "pairwise") %>% 
+  summary(infer = TRUE, adjust = "tukey")
+
+  
+  slope_tests <- summary_emt %>%
+    dplyr::rename(
+      slope = !!rlang::sym(trend_col),
+      group = !!rlang::sym(groupvar)
+    ) %>%
+    dplyr::select(group, slope, SE, df, t.ratio, p.value, lower.CL, upper.CL)
+  
+
+  # Extract slopes and p-values for ref and comparisons
+  extract_stats <- function(g) {
+    d <- slope_tests %>% dplyr::filter(group == g)
+    if(nrow(d) == 0) stop(paste("Group", g, "not found in slope tests"))
+    list(slope = d$slope, p_zero = d$p.value)
+  }
+  
+  ref_stats <- extract_stats(reference_group)
+  comp_stats <- lapply(comparison_groups, extract_stats)
+  names(comp_stats) <- comparison_groups
+  
+  # Interaction p-values
+  fe <- broom.mixed::tidy(mod, effects = "fixed") %>% dplyr::select(term, p.value)
+  
+  interaction_pvals <- sapply(comparison_groups, function(g){
+    term <- paste0(xvar, ":", groupvar, g)
+    val <- fe %>% dplyr::filter(term == !!term) %>% dplyr::pull(p.value)
+    if(length(val)==0) NA_real_ else val
+  })
+  
+  # Cohen's d for each comparison slope difference
+  cohens_d <- sapply(comparison_groups, function(g){
+    (comp_stats[[g]]$slope - ref_stats$slope) / sigma_resid
+  })
+  
+  # Time points in observed range
+  max_elapsed <- max(data[[xvar]], na.rm = TRUE)
+  time_points <- sort(time_points_input[time_points_input <= max_elapsed])
+  if(length(time_points) == 0) {
+    warning("No time points within observed range, using 0")
+    time_points <- 0
+  }
+  
+  # Prepare trends table with all groups
+  trends <- tibble::tibble(Year = time_points) %>%
+    dplyr::mutate(!!paste0(response, "_", reference_group, "_change") := ref_stats$slope * Year)
+  
+  for(g in comparison_groups) {
+    slopes <- comp_stats[[g]]$slope
+    trends <- trends %>%
+      dplyr::mutate(
+        !!paste0(response, "_", g, "_change") := slopes * Year,
+        !!paste0("Difference_", g, "_vs_", reference_group) := (slopes - ref_stats$slope) * Year,
+        !!paste0("Cohen_d_diff_", g, "_vs_", reference_group) := cohens_d[g] * Year
+      )
+  }
+  
+  trends <- trends %>% dplyr::mutate(across(-Year, ~round(., 3)))
+  
+  # Model summary table
+  model_summary <- tibble::tibble(
+    Outcome = response,
+    Measure = "Annual change (linear trend)",
+    !!paste0(reference_group, "_slope") := round(ref_stats$slope,4),
+    !!paste0(reference_group, "_p_zero") := round(ref_stats$p_zero,4),
+    Residual_SD = round(sigma_resid, 3)
+  )
+  
+  for(g in comparison_groups) {
+    model_summary[[paste0(g,"_slope")]] <- round(comp_stats[[g]]$slope,4)
+    model_summary[[paste0(g,"_p_zero")]] <- round(comp_stats[[g]]$p_zero,4)
+    model_summary[[paste0("p_diff_slopes_", g, "_vs_", reference_group)]] <- round(interaction_pvals[g],4)
+    model_summary[[paste0("Cohen_d_diff_", g, "_vs_", reference_group)]] <- round(cohens_d[g],3)
+  }
+  
+  list(
+    trends = trends,
+    model_summary = model_summary,
+    model = mod,
+    slope_tests = slope_tests,
+    contrasts_df = contrasts_df
+  )
+}
+
+
+#Plot the slopes
+plot_slopes <- function(model_summary_list,  colors = c("CN" = "#00BFC4", "MCI" = "#F8766D")) {
+
+  # Combine all model summaries
+  all_summaries <- bind_rows(model_summary_list)
+  
+  # Identify slope and p-value columns by pattern
+  slope_cols <- grep("_slope$", colnames(all_summaries), value = TRUE)
+  pval_cols <- grep("_p_zero$", colnames(all_summaries), value = TRUE)
+  
+  # Extract outcome variable from 'Outcome' column
+  outcomes <- all_summaries$Outcome
+  
+  # Pivot slopes longer
+  slopes_long <- all_summaries %>%
+    dplyr::select(Outcome, all_of(slope_cols)) %>%
+    tidyr::pivot_longer(cols = -Outcome, names_to = "Group", values_to = "slope") %>%
+    dplyr::mutate(Group = sub("_slope$", "", Group))
+  
+  # Pivot p-values longer
+  pvals_long <- all_summaries %>%
+    dplyr::select(Outcome, all_of(pval_cols)) %>%
+    tidyr::pivot_longer(cols = -Outcome, names_to = "Group", values_to = "p_value") %>%
+    dplyr::mutate(Group = sub("_p_zero$", "", Group))
+  
+  # Join slopes and p-values
+  plot_data <- dplyr::left_join(slopes_long, pvals_long, by = c("Outcome", "Group"))
+  
+  # Significance labels (customize as needed)
+  plot_data <- plot_data %>%
+    dplyr::mutate(
+      sig = case_when(
+        p_value < 0.001 ~ "***",
+        p_value < 0.01  ~ "**",
+        p_value <= 0.05 ~ "*",
+        TRUE ~ ""
+      ),
+      label = paste0(round(slope, 3), sig)
+    )
+  
+  # Use default colors if not provided
+  if (is.null(colors)) {
+    groups <- unique(plot_data$Group)
+    palette <- scales::hue_pal()(length(groups))
+    colors <- setNames(palette, groups)
+  }
+  
+  dodge_width <- 0.8
+  
+  ggplot(plot_data, aes(x = Outcome, y = slope, fill = Group)) +
+    geom_col(position = position_dodge2(width = dodge_width), width = dodge_width, alpha = 0.8) +
+    geom_text(aes(label = label), position = position_dodge2(width = dodge_width), vjust = -0.5, size = 3) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray") +
+    labs(title = "Annual Change in Outcomes by Group",
+         y = "Slope",
+         x = "Biormarker") +
+    scale_fill_manual(values = colors) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "top")
+}
+
+
+#Plot the p-Values of the LME
+plot_pvalues <- function(model_summary_list, pvalue_pattern = "^p_diff_slopes") {
+  all_summaries <- bind_rows(model_summary_list)
+  
+  # Find column matching the pattern for p-values
+  pval_col <- grep(pvalue_pattern, colnames(all_summaries), value = TRUE)
+  
+  if(length(pval_col) == 0) stop("No p-value column matching pattern found")
+  if(length(pval_col) > 1) {
+    warning("Multiple p-value columns matched, using the first: ", pval_col[1])
+    pval_col <- pval_col[1]
+  }
+  
+  p_df <- all_summaries %>%
+    dplyr::select(Outcome, !!rlang::sym(pval_col)) %>%
+    dplyr::rename(p_value = !!rlang::sym(pval_col)) %>%
+    dplyr::mutate(
+      log10_p = -log10(pmax(p_value, 1e-10)),
+      sig = dplyr::case_when(
+        p_value < 0.001 ~ "***",
+        p_value < 0.01  ~ "**",
+        p_value <= 0.05 ~ "*",
+        TRUE ~ ""
+      )
+    ) %>%
+    dplyr::arrange(desc(log10_p))
+  
+  ggplot(p_df, aes(x = reorder(Outcome, log10_p), y = log10_p)) +
+    geom_col(fill = "steelblue", alpha = 0.7) +
+    geom_text(aes(label = paste0(round(p_value, 3), sig)), 
+              hjust = -0.12, size = 3, vjust = -0.2) +
+    geom_hline(yintercept = -log10(0.05), color = "red", linetype = "dashed", alpha = 0.7) +
+    geom_hline(yintercept = -log10(0.01), color = "orange", linetype = "dotted", alpha = 0.5) +
+    geom_hline(yintercept = -log10(0.001), color = "darkred", linetype = "dotdash", alpha = 0.5) +
+    labs(title = "Significance of Group-by-Time Interaction",
+         subtitle = "Dashed line: p = 0.05 | Dotted: p = 0.01 | Dash-dot: p = 0.001",
+         y = expression(-log10),
+         x = "Outcome") +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.margin = margin(t = 10, r = 50, b = 10, l = 10),  # Slightly more right margin
+      plot.subtitle = element_text(size = 9, color = "gray50")
+    ) +
+    coord_cartesian(clip = "off")
+}
+
+
+```
+```{r}
+
+plot_lmer_interaction_with_p <- function(data, response = "TAR", 
+                                        xvar = "elapsed_years", groupvar = "Change_Type",
+                                        covariates = c("AGE", "SEX", "EDUYR"),
+                                        colors = c("Stable" = "#00BFC4", "Progressive" = "#F8766D", "Reverted" = "#7CAE00"), show.legend = FALSE) {
+  # Build formulas
+  full_formula <- paste0(response, " ~ ", xvar, "*", groupvar, " + ",
+                         paste(covariates, collapse = " + "), " + (1 + ", xvar, " | USUBJID)")
+  
+  reduced_formula <- paste0(response, " ~ ", xvar, " + ", groupvar, " + ",
+                            paste(covariates, collapse = " + "), " + (1 + ", xvar, " | USUBJID)")
+
+  
+  # Fit models with REML=FALSE for LRT
+  full_mod <- lmer(as.formula(full_formula), data = data, REML = FALSE)
+  reduced_mod <- lmer(as.formula(reduced_formula), data = data, REML = FALSE)
+
+  # Likelihood ratio test for omnibus interaction
+  lrt <- anova(reduced_mod, full_mod)
+  chi_sq <- lrt$Chisq[2]
+  df <- lrt$`Df`[2]
+  p_val <- lrt$`Pr(>Chisq)`[2]
+  
+  # Add significance stars for omnibus p-value
+  stars <- if (p_val < 0.001) "***" else if (p_val < 0.01) "**" else if (p_val < 0.05) "*" else ""
+  omnibus_label <- sprintf("Interaction: Chi-sq(%d) = %.2f, p = %.4f%s", df, chi_sq, p_val, stars)
+
+  
+  # Extract individual interaction p-values from full model
+  coef_sum <- summary(full_mod)$coefficients
+
+  inter_rows <- grep(paste0(xvar, ":", groupvar), rownames(coef_sum))
+  pvals <- coef_sum[inter_rows, "Pr(>|t|)"]
+  names_pvals <- gsub(paste0(xvar, ":"), "", rownames(coef_sum)[inter_rows])
+  names_pvals <- gsub(groupvar, "", names_pvals)
+  
+  pval_labels <- sapply(seq_along(pvals), function(i) {
+    pval <- pvals[i]
+    stars <- if (pval < 0.001) "***" else if (pval < 0.01) "**" else if (pval < 0.05) "*" else ""
+    paste0("Stable X ", names_pvals[i], ": p = ", round(signif(pval, 4),4), stars)
+  })
+  
+  annotation_text <- paste(c(pval_labels), collapse = "\n")
+  
+  # Build base plot
+  p <- plot_model(full_mod, type = "pred", terms = c(xvar, groupvar)) +
+    labs(title = "", x = xvar, y = response) +
+    scale_color_manual(values = colors) +
+    scale_fill_manual(values = colors) +
+    theme_minimal() +
+    theme(plot.margin=unit(c(0.5,0.5,2,0.5), "lines"))  # extra bottom margin
+  
+  if(!show.legend){
+    p <- p +  theme(legend.position = "none")
+  }
+  
+  # Add individual p-values as an annotation near top left
+  x_anno <- max(data[[xvar]], na.rm = TRUE) * 0.1
+  y_anno <- max(data[[response]], na.rm = TRUE) * 0.75
+  p <- p + annotate("text", x = x_anno, y = y_anno, label = annotation_text, size = 3, hjust = 0, color = "black")
+  
+  # Add omnibus LRT Chi-square test below x-axis label with stars
+  y_axis_min <- min(data[[response]], na.rm = TRUE)
+  offset <- 0.1 * abs(y_axis_min)  # offset for placing below x-axis
+  p + annotate("text", x = mean(range(data[[xvar]], na.rm = TRUE)), y = y_axis_min - offset,
+               label = omnibus_label, size = 3, color = "black", hjust = 0.5)
+  #return(p)
+}
+
+
+
+```
+```{r}
+(plt1 <- plot_lmer_interaction_with_p(df_long.analysis, response = "MMSE") )
+(plt2 <- plot_lmer_interaction_with_p(df_long.analysis, response = "SNSB_Attention"))
+(plt3 <- plot_lmer_interaction_with_p(df_long.analysis, response = "SNSB_Language") )
+(plt4 <- plot_lmer_interaction_with_p(df_long.analysis, response = "SNSB_Visuospatial") )
+(plt5 <- plot_lmer_interaction_with_p(df_long.analysis, response = "SNSB_Memory") )
+(plt6 <- plot_lmer_interaction_with_p(df_long.analysis, response = "SNSB_Frontal"))
+
+# Create first plot with legend on top and smaller text size
+plt1.legend <- plot_lmer_interaction_with_p(df_long.analysis, response = "MMSE", show.legend = TRUE) +
+  guides(color = guide_legend(nrow = 1)) +
+  theme(legend.position = "right", text = element_text(size = 8))
+
+# Extract legend as a separate grob
+legend_b <- cowplot::get_legend(plt1.legend)
+
+(combined_plot <- cowplot::plot_grid(plt1, plt2, plt3, plt4, plt5,plt6,
+                             ncol = 3, label_size =10))
+
+combined <- cowplot::plot_grid (legend_b, combined_plot,  nrow=2, rel_heights = c(0.2/10, 9.8/10))
+print(combined)
+
+#cowplot::save_plot("Longitudinal_Analysis_COGS_all.pdf", combined, ncol = 1,  base_width =13, base_height = 9.0)
+
+```
+```{r}
+
+#(plt1 <-  plot_lmer_interaction_with_p(df_long.analysis,  response = "SPR"))
+(plt1 <-  plot_lmer_interaction_with_p(df_long.analysis,  response = "delta"))
+(plt2 <- plot_lmer_interaction_with_p(df_long.analysis,  response = "theta"))
+(plt3 <- plot_lmer_interaction_with_p(df_long.analysis,  response = "l_alpha"))
+(plt4 <- plot_lmer_interaction_with_p(df_long.analysis,  response = "h_alpha"))
+#(plt3 <-  plot_lmer_interaction_with_p(df_long.analysis,  response = "beta"))
+(plt5 <-  plot_lmer_interaction_with_p(df_long.analysis,  response = "l_beta"))
+(plt6 <-  plot_lmer_interaction_with_p(df_long.analysis,  response = "h_beta"))
+#(plt5 <- plot_lmer_interaction_with_p(df_long.analysis,  response = "TAR"))
+
+#(plt6 <- plot_lmer_interaction_with_p(df_long.analysis,  response = "alpha"))
+
+
+
+(psd.tests <- cowplot::plot_grid(plt1, plt2, plt3, plt4, plt5,plt6,
+                             ncol = 3, label_size =10))
+
+combined <- cowplot::plot_grid (legend_b, psd.tests,  nrow=2, rel_heights = c(0.2/10, 9.8/10))
+print(combined)
+
+cowplot::save_plot("Longitudinal_Analysis_psd_OnlyMCI.pdf", combined, ncol = 1,  base_width =13, base_height = 9.0)
+
+
+```
+
+```{r}
+(plt1 <-  plot_lmer_interaction_with_p(df_long.analysis,  response = "SPR"))
+(plt2 <- plot_lmer_interaction_with_p(df_long.analysis,  response = "TAR"))
+(plt3 <- plot_lmer_interaction_with_p(df_long.analysis,  response = "ABR"))
+(plt4 <- plot_lmer_interaction_with_p(df_long.analysis,  response = "FAA"))
+(plt5 <-  plot_lmer_interaction_with_p(df_long.analysis,  response = "FBA"))
+
+(psd.tests <- cowplot::plot_grid(plt1, plt2, plt3, plt4, plt5,
+                             ncol = 3, label_size =10))
+
+combined <- cowplot::plot_grid (legend_b, psd.tests,  nrow=2, rel_heights = c(0.2/10, 9.8/10))
+print(combined)
+
+cowplot::save_plot("Longitudinal_Analysis_psd_ratios_OnlyMCI.pdf", combined, ncol = 1,  base_width =13, base_height = 9.0)
+
+
+```
+```{r}
+(plt1 <-  plot_lmer_interaction_with_p(df_long.analysis,  response = "delta_flat"))
+(plt2 <- plot_lmer_interaction_with_p(df_long.analysis,  response = "theta_flat"))
+(plt3 <- plot_lmer_interaction_with_p(df_long.analysis,  response = "l_alpha_flat"))
+(plt4 <- plot_lmer_interaction_with_p(df_long.analysis,  response = "h_alpha_flat"))
+(plt5 <-  plot_lmer_interaction_with_p(df_long.analysis,  response = "l_beta_flat"))
+(plt6 <-  plot_lmer_interaction_with_p(df_long.analysis,  response = "h_beta_flat"))
+
+(psd.flat <- cowplot::plot_grid(plt1, plt2, plt3, plt4, plt5,plt6,
+                             ncol = 3, label_size =10))
+
+combined <- cowplot::plot_grid (legend_b, psd.flat,  nrow=2, rel_heights = c(0.2/10, 9.8/10))
+print(combined)
+cowplot::save_plot("Longitudinal_Analysis_psd_flat_OnlyMCI.pdf", combined, ncol = 1,  base_width =13, base_height = 9.0)
+
+```
+
+```{r}
+(plt1 <-  plot_lmer_interaction_with_p(df_long.analysis,  response = "SPR_flat"))
+(plt2 <- plot_lmer_interaction_with_p(df_long.analysis,  response = "TAR_flat"))
+(plt3 <- plot_lmer_interaction_with_p(df_long.analysis,  response = "ABR_flat"))
+(plt4 <- plot_lmer_interaction_with_p(df_long.analysis,  response = "FAA_flat"))
+(plt5 <-  plot_lmer_interaction_with_p(df_long.analysis,  response = "FBA_flat"))
+
+(psd.flat.ratios <- cowplot::plot_grid(plt1, plt2, plt3, plt4, plt5,
+                             ncol = 3, label_size =10))
+
+combined <- cowplot::plot_grid (legend_b, psd.flat.ratios,  nrow=2, rel_heights = c(0.2/10, 9.8/10))
+print(combined)
+
+cowplot::save_plot("Longitudinal_Analysis_psd_flat_ratios.pdf", combined, ncol = 1,  base_width =13, base_height = 9.0)
+```
+```{r}
+(plt1 <- plot_lmer_interaction_with_p(df_long.analysis, response = "peak_cf"))
+(plt2 <- plot_lmer_interaction_with_p(df_long.analysis,response = "peak_pw"))
+(plt3 <-  plot_lmer_interaction_with_p(df_long.analysis, response = "peak_bw"))
+(plt4 <- plot_lmer_interaction_with_p(df_long.analysis, response = "exponent"))
+(plt5 <- plot_lmer_interaction_with_p(df_long.analysis, response = "offset"))
+#(plt6 <-  plot_lmer_interaction_with_p(df_long.analysis, response = "error"))
+
+#(psd.parameterized.flat <- plot_grid(plt1, plt2, plt3, plt4,plt5,plt6, ncol = 3))
+
+(psd.parameterized.flat <- cowplot::plot_grid(plt1, plt2, plt3, plt4, plt5,
+                             ncol = 3, label_size =10))
+
+combined <- cowplot::plot_grid (legend_b, psd.parameterized.flat,  nrow=2, rel_heights = c(0.2/10, 9.8/10))
+cowplot::save_plot("Longitudinal_Analysis_periodic.pdf", combined, ncol = 1,  base_width =13, base_height = 9.0)
+
+
+```
+```{r}
+variables <- c("SPR", "l_alpha", "h_alpha", "FAA", "TAR", "ABR", "FBA", "delta","theta","l_beta","h_beta")
+#variables <- c("theta")
+reference_group <- "Stable"
+comparison_groups <- c("Progressive", "Reverted")
+colors.legend <- c("Stable" = "#00BFC4", "Progressive" = "#F8766D", "Reverted" = "#7CAE00")
+
+results <- lapply(variables, function(var) {
+  analyze_longitudinal_trends(data = df_long.analysis, response = var, groupvar = "Change_Type", reference_group = reference_group, comparison_groups = comparison_groups)
+})
+
+
+# Name results
+names(results) <- variables
+
+model_summary_list <- lapply(results, function(result) {
+  result$model_summary
+})
+# Extract all summaries into one table
+all_summaries <- dplyr::bind_rows(lapply(results, function(x) x$model_summary), .id = "Variable")
+
+
+plot_pvalues(model_summary_list)
+
+(plt.slopes <- plot_slopes(model_summary_list, colors = colors.legend))
+all_summaries
+cowplot::save_plot("Longitudinal_Analysis_Slopes_all.pdf", plt.slopes, ncol = 1,  base_width =13, base_height = 9.0)
+```
+```{r}
+variables <- c("SPR_flat", "l_alpha_flat", "h_alpha_flat", "FAA_flat", "TAR_flat", "ABR_flat", "FBA_flat", "delta_flat","theta_flat","l_beta_flat","h_beta_flat", "exponent", "offset", "peak_cf", "peak_pw", "peak_bw")
+
+results <- lapply(variables, function(var) {
+  analyze_longitudinal_trends(data = df_long.analysis, response = var, groupvar = "Change_Type", reference_group = reference_group, comparison_groups = comparison_groups)
+})
+
+
+# Name results
+names(results) <- variables
+
+model_summary_list <- lapply(results, function(result) {
+  result$model_summary
+})
+# Extract all summaries into one table
+all_summaries <- dplyr::bind_rows(lapply(results, function(x) x$model_summary), .id = "Variable")
+
+
+plot_pvalues(model_summary_list)
+
+(plt.slopes <- plot_slopes(model_summary_list, colors = colors.legend))
+all_summaries
+cowplot::save_plot("Longitudinal_Analysis_Slopes_FOOOF_.pdf", plt.slopes, ncol = 1,  base_width =13, base_height = 9.0)
+```
+
+```{r}
+# Fit random intercept and slope LME model
+mod <- lmer(SPR ~ elapsed_years*Change_Type  + AGE + SEX + EDUYR  + (1 + elapsed_years| USUBJID), data = df_long.analysis, REML = TRUE)
+summary(mod)
+```
+
+```{r}
+
+library(ggsignif)
+
+
+model_contrasts_list <- lapply(results, function(result) {
+  result$contrasts_df
+})
+
+# Suppose you have group slopes already summarized per variable:
+group_slopes <- data.frame(
+  Change_Type = c("Stable", "Progressive", "Reverted"),
+  slope = c(0.145, 0.668, 0.528),      # Replace with your actual estimates
+  lower = c(-0.0161, 0.0329, 0.1503),
+  upper = c(0.306, 1.304, 0.905)
+)
+
+# Set factor levels explicitly so "Stable" is first:
+group_slopes <- group_slopes %>%
+  mutate(Change_Type = factor(Change_Type, levels = c("Stable", "Progressive", "Reverted")))
+
+
+# Your contrasts data with simple group names split for ggsignif
+contrast_df <- model_contrasts_list$beta %>% 
+  rename(
+    Contrast = contrast,
+    diff = estimate,
+    lower = lower.CL,
+    upper = upper.CL,
+    p_value = p.value
+  ) %>%
+  mutate(
+    signif_stars = ifelse(p_value < 0.001, "***",
+                   ifelse(p_value < 0.01, "**",
+                   ifelse(p_value < 0.05, "*", ""))),
+    # Split contrast strings into pairs for comparisons
+    group1 = sub(" -.*", "", Contrast),
+    group2 = sub(".*- ", "", Contrast),
+    
+    p.label = paste0(round(p_value,3),signif_stars)
+  )
+
+# Comparisons list for geom_signif (each pair a vector)
+comparisons <- split(contrast_df, seq(nrow(contrast_df))) %>%
+  lapply(function(row) as.character(c(row$group1, row$group2)))
+
+# Assign y positions for significance brackets, spaced above the highest bar
+y_positions <- max(group_slopes$upper) + seq(0.1, 0.3, length.out = length(comparisons))
+
+# Plot group slopes
+p <- ggplot(group_slopes, aes(x = Change_Type, y = slope, fill = Change_Type)) +
+  geom_col(alpha = 0.7) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+  labs(title = "Estimated Annual Slopes By Group",
+       y = "Estimated Slope",
+       x = NULL) +
+    scale_fill_manual(values =  c("Stable" = "#00BFC4", "Progressive" = "#F8766D", "Reverted" = "#7CAE00")) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Add significance brackets with stars, at assigned y positions, mapping annotations
+p + geom_signif(
+  comparisons = comparisons,
+  annotations = contrast_df$p.label,
+  y_position = y_positions,
+  tip_length = 0.01,
+  textsize = 3
+)
+
+model_contrasts_list
+
+```
+
+### Predictions and Inferences
+```{r}
+plot_lmer_model_with_interaction_p <-function(data, response = "SPR", 
+                                            xvar = "elapsed_years", groupvar = "Group",
+                                            covariates = c("AGE", "SEX", "EDUYR"),
+                                            colors = c("CN" = "#00BFC4", "MCI" = "#F8766D"),
+                                            n_points = 100, show.legend = FALSE) {
+  # Fit the model with lmerTest to get p-values
+  formula_str <- paste0(response, " ~ ", xvar, "*", groupvar, " + ",
+                        paste(covariates, collapse = " + "), " + (1 + ", xvar, " | USUBJID)")
+  mod <- lmer(formula_str, data = data)
+  
+  # Create prediction grid for fixed effects
+  pred_data <- expand.grid(
+    elapsed_years = seq(min(data[[xvar]], na.rm = TRUE),
+                        max(data[[xvar]], na.rm = TRUE),
+                        length.out = n_points),
+    Group = unique(data[[groupvar]])
+  )
+  
+  # Set continuous covariates (e.g., AGE, EDUYR) to their median.
+  #Set categorical/factor covariates (e.g., SEX) to the reference level.
+  #This ensures predictions are adjusted for typical or baseline values of confounders
+  for (cov in covariates) {
+    if (is.numeric(data[[cov]])) {
+      pred_data[[cov]] <- median(data[[cov]], na.rm = TRUE)
+    } else if (is.factor(data[[cov]])) {
+      pred_data[[cov]] <- levels(data[[cov]])[1]
+    }
+  }
+  title <-  paste("Predicted", response, "Trajectories by Group")
+  # Predict fixed effects only i.e Smooth overall preidtcion for MCI or CN
+  pred_data$predicted <- predict(mod, newdata = pred_data, re.form = NA)
+  
+  # Predict individual subject trajectories (include random effects)
+  data$predicted_indiv <- predict(mod, newdata = data, re.form = NULL)
+  
+   sig_stars <- function(p) {
+    if (p < 0.001) "***" else if (p < 0.01) "**" else if (p < 0.05) "*" else ""
+  }
+  
+  # Extract interaction p-value for elapsed_years:Group
+  coef_summary <- summary(mod)$coefficients
+  interaction_term <- paste0(xvar, ":", groupvar, unique(data[[groupvar]])[2])
+  # The exact name to match can be tricky, check which name matches in coef_summary
+  inter_pval <- coef_summary[grep("elapsed_years:Group", rownames(coef_summary)), "Pr(>|t|)"]
+  pval_label <- paste0(paste0("Time", " x ", groupvar,", p = "), round(signif(inter_pval, 3),3), sig_stars(signif(inter_pval, 3)))
+  
+  # Create the plot
+  p <- ggplot() +
+    geom_line(data = data,
+              aes_string(x = xvar, y = "predicted_indiv", group = "USUBJID", color = groupvar),
+              alpha = 0.3, size = 0.5) +
+    geom_line(data = pred_data,
+              aes(x = elapsed_years, y = predicted, color = Group),
+              size = 1.5) +
+    labs(title = "",
+         x = xvar,
+         y = response) +
+    theme_minimal() +
+    scale_color_manual(values = colors)+
+    annotate("text", x = Inf, y = -Inf, label = pval_label, hjust = 1.0, vjust = -1, size = 3.0, color = "black")
+  
+  #print(summary(mod))
+  
+  if(!show.legend){
+     p <- p + theme(legend.position = "none")
+  }
+  return(p)
+}
+
+```
+
+
+
+### General LMMs
+```{r}
+df_long.analysis <- df_long.analysis %>%filter(Group %in% c("MCI","CN"))
+(plt1 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "MMSE"))
+(plt2 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "SNSB_Attention"))
+(plt3 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "SNSB_Language"))
+(plt4 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "SNSB_Visuospatial"))
+(plt5 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "SNSB_Memory"))
+(plt6 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "SNSB_Frontal"))
+
+# Create first plot with legend on top and smaller text size
+plt1.legend <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "MMSE", show.legend = TRUE) +
+  guides(color = guide_legend(nrow = 1)) +
+  theme(legend.position = "right", text = element_text(size = 8))
+
+# Extract legend as a separate grob
+legend_b <- cowplot::get_legend(plt1.legend)
+
+cog.tests <- cowplot::plot_grid(plt1, plt2, plt3, plt4, plt5,plt6,
+                             ncol = 3, label_size =10)
+
+(combined <- cowplot::plot_grid (legend_b, cog.tests,  nrow=2, rel_heights = c(0.2/10, 9.8/10)))
+```
+
+```{r}
+(plt1 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "delta"))
+(plt2 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "theta"))
+(plt3 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "l_alpha"))
+(plt4 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "h_alpha"))
+(plt5 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "l_beta"))
+(plt6 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "h_beta"))
+
+psd.tests <- cowplot::plot_grid(plt1, plt2, plt3, plt4, plt5,plt6,
+                             ncol = 3, label_size =10)
+
+(combined.psd.tests <- cowplot::plot_grid (legend_b, psd.tests,  nrow=2, rel_heights = c(0.2/10, 9.8/10)))
+
+```
+
+
+```{r}
+(plt1 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "delta_flat"))
+(plt2 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "theta_flat"))
+(plt3 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "l_alpha_flat"))
+(plt4 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "h_alpha_flat"))
+(plt5 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "l_beta_flat"))
+(plt6 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "h_beta_flat"))
+
+psd.tests <- cowplot::plot_grid(plt1, plt2, plt3, plt4, plt5,plt6,
+                             ncol = 3, label_size =10)
+
+(combined.psd.tests <- cowplot::plot_grid (legend_b, psd.tests,  nrow=2, rel_heights = c(0.2/10, 9.8/10)))
+
+```
+```{r}
+
+(plt1 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "SPR"))
+(plt2 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "TAR"))
+(plt3 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "FAA"))
+(plt4 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "ABR"))
+(plt5 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "FBA"))
+
+psd_.ratios <- cowplot::plot_grid(plt1, plt2, plt3, plt4, plt5,
+                             ncol = 3, label_size =10)
+
+(combined.psd_.flat <- cowplot::plot_grid (legend_b, psd_.ratios,  nrow=2, rel_heights = c(0.2/10, 9.8/10)))
+
+```
+
+```{r}
+
+(plt1 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "SPR_flat"))
+(plt2 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "TAR_flat"))
+(plt3 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "FAA_flat"))
+(plt4 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "ABR_flat"))
+(plt5 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "FBA_flat"))
+
+psd_.flat <- cowplot::plot_grid(plt1, plt2, plt3, plt4, plt5,
+                             ncol = 3, label_size =10)
+
+(combined.psd_.flat <- cowplot::plot_grid (legend_b, psd_.flat,  nrow=2, rel_heights = c(0.2/10, 9.8/10)))
+
+```
+```{r}
+(plt1 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "peak_cf"))
+(plt2 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "peak_pw"))
+(plt3 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "peak_bw"))
+(plt4 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "exponent"))
+(plt5 <- plot_lmer_model_with_interaction_p(df_long.analysis, response = "offset"))
+
+psd.parameterized.flat <- cowplot::plot_grid(plt1, plt2, plt3, plt4, plt5,
+                             ncol = 3, label_size =10)
+
+(combined.psd.parameterized.flat <- cowplot::plot_grid (legend_b, psd.parameterized.flat,  nrow=2, rel_heights = c(0.2/10, 9.8/10)))
+
+```
+```{r}
+# Summary of follow-up time
+summary(df_long.analysis$elapsed_years)
+
+# Max follow-up
+max_followup <- max(df_long.analysis$elapsed_years)
+cat("Maximum follow-up:", round(max_followup, 1), "years\n")
+
+# Number of visits per subject
+visits_per_subject <- df_long.analysis %>%
+  dplyr::count(USUBJID) %>%
+  dplyr::summarize(
+    min_visits = min(n),
+    mean_visits = mean(n),
+    max_visits = max(n)
+  )
+print(visits_per_subject)
+
+```
+
+```{r}
+
+reference_group <- "CN"
+comparison_groups <- c("MCI")
+
+results <- lapply(variables, function(var) {
+  analyze_longitudinal_trends(data = df_long.analysis, response = var, reference_group = reference_group, comparison_groups = comparison_groups)
+})
+
+# Name results
+names(results) <- variables
+
+model_summary_list <- lapply(results, function(result) {
+  result$model_summary
+})
+# Extract all summaries into one table
+all_summaries <- dplyr::bind_rows(lapply(results, function(x) x$model_summary), .id = "Variable")
+
+print(all_summaries)
+
+```
+
+
+```{r}
+
+plot_slopes(model_summary_list)
+
+
+```
+
+
+```{r}
+
+plot_pvalues(model_summary_list)
+
+
+```
+```
+
