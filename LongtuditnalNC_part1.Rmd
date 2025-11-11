@@ -51,7 +51,7 @@ df <- df %>% add_count(USUBJID, name = "visit_count")
 view(dfSummary(df ))
 
 df.long <- df %>% 
-   # filter(Group %in% c("CN", "MCI", "AD"), year %in% 2019:2024, r_squared >= 0.95) %>%
+   # filter(COGNITIVESTAT %in% c("CN", "MCI", "AD"), year %in% 2019:2024, r_squared >= 0.95) %>%
   filter(Group %in% c("CN", "MCI", "AD"), year %in% 2019:2024) %>%
   filter(!is.na(COGNITIVESTAT) & COGNITIVESTAT != "") %>% # drop NA or empty
   filter(!COGNITIVESTAT %in% c("aMCI,Dep")) %>%
