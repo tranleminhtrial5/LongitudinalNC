@@ -42,7 +42,7 @@ Required Libraries
 
 ```{r}
 # Read your data ( KIOM_USER or admin )
-setwd("C:/Users/admin/Documents/GitHub/LongitudinalNC") 
+setwd("C:/Users/KIOM_USER/Documents/GitHub/LongitudinalNC") 
 df <- read.csv("Longitudinal_BIA_StableNCvsProgressiveNC.csv", 
                header = TRUE, stringsAsFactors = FALSE, na.strings = c("", "NA"))
 

@@ -42,7 +42,7 @@ Required Libraries
 
 ```{r}
 # Read your data ( KIOM_USER or admin )
-setwd("C:/Users/admin/Documents/GitHub/LongitudinalNC") 
+setwd("C:/Users/KIOM_USER/Documents/GitHub/LongitudinalNC") 
 df <- read.csv("Longitudinal_BIA_StableNCvsProgressiveNC.csv", 
                header = TRUE, stringsAsFactors = FALSE, na.strings = c("", "NA"))
 
@@ -50,17 +50,17 @@ df <- df %>% add_count(USUBJID, name = "visit_count")
 
 view(dfSummary(df ))
 
-df.long <- df %>% 
-   # filter(Group %in% c("CN", "MCI", "AD"), year %in% 2019:2024, r_squared >= 0.95) %>%
-  filter(Group %in% c("CN", "MCI", "AD"), year %in% 2019:2024) %>%
+df.long <- df %>%
   filter(!is.na(COGNITIVESTAT) & COGNITIVESTAT != "") %>% # drop NA or empty
-  filter(!COGNITIVESTAT %in% c("aMCI,Dep")) %>%
-  drop_na() %>% 
+  drop_na() %>%
   add_count(USUBJID, name = "visit_count") %>%
   mutate(
-    # Treat SMI as CN
-    COGNITIVESTAT = ifelse(COGNITIVESTAT == "SMI", "CN", COGNITIVESTAT)
-  ) 
+    COGNITIVESTAT = case_when(
+      COGNITIVESTAT %in% c("SMI") ~ "CN",
+      COGNITIVESTAT %in% c("aMCI", "naMCI") ~ "MCI",
+      TRUE ~ COGNITIVESTAT
+    )
+  )
 
 # Keep only subjects with at least 2 valid records
 df.long_multi <- df.long %>%
@@ -69,10 +69,9 @@ df.long_multi <- df.long %>%
   ungroup()
 
 (df_changes <- df.long_multi %>%
-  arrange(USUBJID, year) %>%  # ensure chronological order
+  arrange(USUBJID, year) %>%  
   group_by(USUBJID) %>%
   summarise(
-    #Status_Changed = n_distinct(COGNITIVESTAT, na.rm = TRUE) > 1,
     Transitions = paste(COGNITIVESTAT, collapse = " -> ")
   ))
 
@@ -86,35 +85,43 @@ df.long_multi <- df.long %>%
 view(dfSummary(df.long_multi ))
 ```
 ```{r}
-#ONly take note of inital and final transitions
+# Load required libraries
+library(dplyr)
+library(lubridate)
+library(summarytools)
+
+# ---- Data Transformation Pipeline ----
 df_overall <- df.long_multi %>%
   mutate(
     COGNITIVESTAT = case_when(
       COGNITIVESTAT %in% c("aMCI", "naMCI") ~ "MCI",
       COGNITIVESTAT == "SMI" ~ "CN",
       TRUE ~ COGNITIVESTAT
-    )
+    ),
+    datetest = mdy(datetest)
   ) %>%
-  arrange(USUBJID, year) %>%
+  arrange(USUBJID, datetest) %>%
   group_by(USUBJID) %>%
   mutate(
     Initial_Status = first(COGNITIVESTAT),
-    Final_Status   = last(COGNITIVESTAT)
+    Final_Status   = last(COGNITIVESTAT),
+    baseline_date  = first(datetest),
+    elapsed_years  = as.numeric(difftime(datetest, baseline_date, units="days")) / 365.25,
+    Transition     = paste(Initial_Status, "->", Final_Status),
+    Change_Type    = case_when(
+      Initial_Status == "CN" & Final_Status == "CN" ~ "StableCN",
+      Initial_Status == "CN" & Final_Status == "MCI" ~ "ProgressiveCN",
+      TRUE ~ NA_character_
+    )
   ) %>%
-  mutate(
-  Transition = paste(Initial_Status, "->", Final_Status),
-  Change_Type = case_when(
-    Initial_Status == "CN" & Final_Status == "CN" ~ "StableCN",
-    Initial_Status == "CN" & Final_Status == "MCI" ~ "ProgressiveCN",
-    TRUE ~ NA_character_
-  )
-) %>%
+  ungroup() %>%
+  select(-baseline_date)
 
-  ungroup()
+# --- Optional Data Summary
+view(dfSummary(df_overall))
 
-view(dfSummary(df_overall )) 
-
-(df_transition_summary <- df_overall %>%
+# --- Transition Summary (visit-level)
+df_transition_summary <- df_overall %>%
   group_by(Transition) %>%
   summarise(
     Count = n(),
@@ -123,63 +130,37 @@ view(dfSummary(df_overall ))
   mutate(
     Percentage = round(Count / sum(Count) * 100, 1)
   ) %>%
-  arrange(desc(Count)))
+  arrange(desc(Count))
 
+# --- Unique Participants by Transition Type
+df_unique_transitions <- df_overall %>%
+  select(USUBJID, Transition, Change_Type) %>%
+  distinct()
+
+df_summary <- df_unique_transitions %>%
+  group_by(Transition, Change_Type) %>%
+  summarise(
+    Count = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Percentage = round(Count / sum(Count) * 100, 1)
+  ) %>%
+  arrange(desc(Count))
+
+# --- Analysis-ready Data Frame
 df_long.analysis <- df_overall %>%
   drop_na() %>%
-  mutate(datetest = mdy(datetest)) %>%              
-  group_by(USUBJID) %>%
-  arrange(datetest) %>%                             
-  mutate(
-    baseline_date = min(datetest, na.rm = TRUE),
-    elapsed_years = as.numeric(difftime(datetest, baseline_date, units="days")) / 365.25
-  ) %>%
-  select(-baseline_date) %>%
-  ungroup()
+  mutate_if(is.character, as.factor) %>%
+  droplevels() %>%
+  add_count(USUBJID, name = "visit_count")
 
-#get Unique Particpants for analysis
-df_unique_transitions <- df_overall %>%
-  select(USUBJID, Transition, Change_Type) %>%  # keep only relevant columns
-  distinct()  # keep only unique rows by ID, Transition, Change_Type
-
-(df_summary <- df_unique_transitions %>%
-  group_by(Transition, Change_Type) %>%
-  summarise(
-    Count = n(),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    Percentage = round(Count / sum(Count) * 100, 1)
-  ) %>%
-  arrange(desc(Count)))
-
-df_long.analysis <- df_overall  %>%  drop_na() %>% mutate_if(is.character, as.factor) %>%   droplevels() %>%
-  add_count(USUBJID, name = "visit_count") #%>% filter(Transition != "CN -> CN")
-
-# Relevel Change_Type with "Stable" as reference
 df_long.analysis$Change_Type <- relevel(factor(df_long.analysis$Change_Type), ref = "StableCN")
 
-view(dfSummary(df_long.analysis ))
+view(dfSummary(df_long.analysis))
 
-
-#get Unique Particpants for analysis
-df_unique_transitions <- df_long.analysis %>%
-  select(USUBJID, Transition, Change_Type) %>%  # keep only relevant columns
-  distinct()  # keep only unique rows by ID, Transition, Change_Type
-
-(df_summary <- df_unique_transitions %>%
-  group_by(Transition, Change_Type) %>%
-  summarise(
-    Count = n(),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    Percentage = round(Count / sum(Count) * 100, 1)
-  ) %>%
-  arrange(desc(Count)))
 #df_demo <- df.long_multi %>% select( Group, SEX:EDUYR, MMSE,AGE) 
 view(dfSummary(df.long_multi ))
-
 ```
 
 
@@ -189,7 +170,7 @@ view(dfSummary(df.long_multi ))
 library(lmerTest)  # load this instead of lme4 for fitted model
 
 plot_lmer_predictions_with_stats <- function(data, response = "PA_lower", 
-                                            xvar = "elapsed_years", groupvar = "Group",
+                                            xvar = "elapsed_years", groupvar = "Change_Type",
                                             covariates = c("AGE", "SEX", "EDUYR"),
                                             n_points = 100) {
   # Fit the model with lmerTest to get p-values

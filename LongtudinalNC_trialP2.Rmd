@@ -1,0 +1,342 @@
+---
+title: "Longitudinal trajectories of segmental bioimpedance and cognitive conversion in older adults - Part 1"
+output: html_notebook
+---
+
+Longitudinal trajectories of segmental bioimpedance and cognitive conversion in older adults
+
+------------------------------------------------------------------------
+
+```{r}
+
+# --- 1. Load Packages ---
+library(dplyr)
+library(lubridate)
+library(lmerTest)
+library(emmeans)
+library(broom.mixed)
+library(ggplot2)
+library(tidyr)
+library(summarytools)
+library(tibble)
+library(forcats)
+library(stringr)
+
+# --- 2. Read and Prepare Data ---
+setwd("C:/Users/KIOM_USER/Documents/GitHub/LongitudinalNC") 
+df <- read.csv("Longitudinal_BIA_StableNCvsProgressiveNC.csv", 
+               header = TRUE, stringsAsFactors = FALSE, na.strings = c("", "NA"))
+df <- df %>% add_count(USUBJID, name = "visit_count")
+df.long <- df %>%
+  filter(!is.na(COGNITIVESTAT) & COGNITIVESTAT != "") %>% 
+  drop_na() %>%
+  add_count(USUBJID, name = "visit_count") %>%
+  mutate(
+    COGNITIVESTAT = case_when(
+      COGNITIVESTAT %in% c("SMI") ~ "CN",
+      COGNITIVESTAT %in% c("aMCI", "naMCI") ~ "MCI",
+      TRUE ~ COGNITIVESTAT
+    )
+  )
+df.long_multi <- df.long %>%
+  group_by(USUBJID) %>%
+  filter(n() >= 2) %>%
+  ungroup()
+df_overall <- df.long_multi %>%
+  mutate(
+    COGNITIVESTAT = case_when(
+      COGNITIVESTAT %in% c("aMCI", "naMCI") ~ "MCI",
+      COGNITIVESTAT == "SMI" ~ "CN",
+      TRUE ~ COGNITIVESTAT
+    ),
+    datetest = mdy(datetest)
+  ) %>%
+  arrange(USUBJID, datetest) %>%
+  group_by(USUBJID) %>%
+  mutate(
+    Initial_Status = first(COGNITIVESTAT),
+    Final_Status   = last(COGNITIVESTAT),
+    baseline_date  = first(datetest),
+    elapsed_years  = as.numeric(difftime(datetest, baseline_date, units="days")) / 365.25,
+    Transition     = paste(Initial_Status, "->", Final_Status),
+    Change_Type    = case_when(
+      Initial_Status == "CN" & Final_Status == "CN" ~ "StableCN",
+      Initial_Status == "CN" & Final_Status == "MCI" ~ "ProgressiveCN",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  ungroup() %>%
+  select(-baseline_date)
+df_long.analysis <- df_overall %>%
+  drop_na() %>%
+  mutate_if(is.character, as.factor) %>%
+  droplevels() %>%
+  add_count(USUBJID, name = "visit_count")
+df_long.analysis$Change_Type <- relevel(factor(df_long.analysis$Change_Type), ref = "StableCN")
+
+# --- 3. Biomarker List (match to columns in your data) ---
+print(colnames(df_long.analysis))
+biomarkers <- c("MMSE", "SNSB_attention", "SNSB_language", "SNSB_visuospatial", "SNSB_memory", "SNSB_frontal" , "BMI", "whr", "pbcm", "pbf", "bmr", "ecw_tcw", "tbw_ffm",
+  "PA50_total", "ECW_ICW_upper", "ECW_ICW_lower", "Water_Lean_upper", "Water_Lean_lower",
+  "R_upper", "R_lower", "Xc_upper", "Xc_lower", "PA_upper", "PA_lower",
+  "R_H_upper", "R_H_lower", "Xc_H_upper", "Xc_H_lower")
+
+# Defensive: Only analyze variables present in data
+biomarkers_ok <- biomarkers[biomarkers %in% colnames(df_long.analysis)]
+if (length(biomarkers_ok) == 0) stop("None of the biomarkers are found in your data!")
+
+# --- 4. Functions ---
+plot_lmer_predictions_with_stats <- function(data, response = "whr", 
+                                            xvar = "elapsed_years", groupvar = "Change_Type",
+                                            covariates = c("AGE", "SEX", "EDUYR"),
+                                            n_points = 100) {
+  formula_str <- paste0(response, " ~ ", xvar, "*", groupvar, " + ",
+                        paste(covariates, collapse = " + "), " + (1 + ", xvar, " | USUBJID)")
+  mod <- lmer(as.formula(formula_str), data = data)
+  newdata <- expand.grid(
+    elapsed_years = seq(min(data[[xvar]], na.rm = TRUE), max(data[[xvar]], na.rm = TRUE), length.out = n_points),
+    Change_Type = levels(data[[groupvar]])
+  )
+  for (cov in covariates) {
+    if (is.numeric(data[[cov]])) {
+      newdata[[cov]] <- median(data[[cov]], na.rm = TRUE)
+    } else if (is.factor(data[[cov]])) {
+      newdata[[cov]] <- levels(data[[cov]])[1]
+    }
+  }
+  newdata$predicted <- predict(mod, newdata = newdata, re.form = NA)
+  fixef_summary <- summary(mod)$coefficients
+  fixef_df <- as.data.frame(fixef_summary)
+  fixef_df$Term <- rownames(fixef_df)
+  sig_stars <- function(p) if (p < 0.001) "***" else if (p < 0.01) "**" else if (p < 0.05) "*" else ""
+  fixef_df$stars <- sapply(fixef_df$`Pr(>|t|)`, sig_stars)
+  fixef_df$label <- paste0(fixef_df$Term, ": ", round(fixef_df$Estimate, 3), " ", fixef_df$stars)
+  y_top <- max(newdata$predicted, na.rm = TRUE)
+  y_spacing <- (y_top - min(newdata$predicted, na.rm = TRUE)) * 0.05
+  y_positions <- seq(y_top, y_top - y_spacing * (nrow(fixef_df) - 1), length.out = nrow(fixef_df))
+  annot_df <- data.frame(
+    x = rep(min(newdata[[xvar]]), nrow(fixef_df)),
+    y = y_positions,
+    label = fixef_df$label
+  )
+  p <- ggplot(newdata, aes_string(x = xvar, y = "predicted", color = groupvar)) +
+    geom_line(size = 1.2) +
+    geom_text(data = annot_df, aes(x = x, y = y, label = label), hjust = 0, size = 3, inherit.aes = FALSE) +
+    labs(title = paste("Predicted", response, "Trajectories by", groupvar),
+         x = xvar, y = paste("Predicted", response)) +
+    theme_minimal()
+  print(summary(mod))
+  return(p)
+}
+
+analyze_longitudinal_trends <- function(data, 
+                                        response = "whr",
+                                        xvar = "elapsed_years", 
+                                        groupvar = "Change_Type",
+                                        covariates = c("AGE", "SEX", "EDUYR"),
+                                        subject_id = "USUBJID",
+                                        time_points_input = c(0,1,2,3,4,5,6),
+                                        reference_group = NULL,
+                                        comparison_groups = NULL) {
+  if (!(response %in% colnames(data))) {
+    warning(paste("Variable", response, "is not found! Skipping."))
+    return(NULL)
+  }
+  if(!is.factor(data[[groupvar]])) {
+    data[[groupvar]] <- as.factor(data[[groupvar]])
+  }
+  group_levels <- levels(data[[groupvar]])
+  if(is.null(reference_group)) reference_group <- group_levels[1]
+  if(is.null(comparison_groups)) comparison_groups <- setdiff(group_levels, reference_group)
+  if(!(reference_group %in% group_levels)) stop("Reference group not in groupvar levels")
+  if(!all(comparison_groups %in% group_levels)) stop("Some comparison groups not in groupvar levels")
+  fixed_effects <- paste0(xvar, "*", groupvar, " + ", paste(covariates, collapse = " + "))
+  random_effects <- paste0("(1 + ", xvar, " | ", subject_id, ")")
+  formula_str <- paste0(response, " ~ ", fixed_effects, " + ", random_effects)
+  mod <- lmer(as.formula(formula_str), data = data)
+  sigma_resid <- sigma(mod)
+  emt <- emtrends(mod, specs = groupvar, var = xvar)
+  summary_emt <- summary(emt, infer = TRUE)
+  trend_col <- grep("\\.trend$", colnames(summary_emt), value = TRUE)
+  if(length(trend_col) != 1) stop("Unexpected number of trend columns in emtrends output")
+  contrasts_df <- contrast(emt, method = "pairwise") %>% summary(infer = TRUE, adjust = "tukey")
+  slope_tests <- summary_emt %>%
+    dplyr::rename(
+      slope = !!rlang::sym(trend_col),
+      group = !!rlang::sym(groupvar)
+    ) %>%
+    dplyr::select(group, slope, SE, df, t.ratio, p.value, lower.CL, upper.CL)
+  extract_stats <- function(g) {
+    d <- slope_tests %>% dplyr::filter(group == g)
+    if(nrow(d) == 0) stop(paste("Group", g, "not found in slope tests"))
+    list(slope = d$slope, p_zero = d$p.value)
+  }
+  ref_stats <- extract_stats(reference_group)
+  comp_stats <- lapply(comparison_groups, extract_stats)
+  names(comp_stats) <- comparison_groups
+  fe <- broom.mixed::tidy(mod, effects = "fixed") %>% dplyr::select(term, p.value)
+  interaction_pvals <- sapply(comparison_groups, function(g){
+    term <- paste0(xvar, ":", groupvar, g)
+    val <- fe %>% dplyr::filter(term == !!term) %>% dplyr::pull(p.value)
+    if(length(val)==0) NA_real_ else val
+  })
+  cohens_d <- sapply(comparison_groups, function(g){
+    (comp_stats[[g]]$slope - ref_stats$slope) / sigma_resid
+  })
+  max_elapsed <- max(data[[xvar]], na.rm = TRUE)
+  time_points <- sort(time_points_input[time_points_input <= max_elapsed])
+  if(length(time_points) == 0) {
+    warning("No time points within observed range, using 0")
+    time_points <- 0
+  }
+  trends <- tibble::tibble(Year = time_points) %>%
+    dplyr::mutate(!!paste0(response, "_", reference_group, "_change") := ref_stats$slope * Year)
+  for(g in comparison_groups) {
+    slopes <- comp_stats[[g]]$slope
+    trends <- trends %>%
+      dplyr::mutate(
+        !!paste0(response, "_", g, "_change") := slopes * Year,
+        !!paste0("Difference_", g, "_vs_", reference_group) := (slopes - ref_stats$slope) * Year,
+        !!paste0("Cohen_d_diff_", g, "_vs_", reference_group) := cohens_d[g] * Year
+      )
+  }
+  trends <- trends %>% dplyr::mutate(across(-Year, ~round(., 3)))
+  model_summary <- tibble::tibble(
+    Outcome = response,
+    Measure = "Annual change (linear trend)",
+    !!paste0(reference_group, "_slope") := round(ref_stats$slope,4),
+    !!paste0(reference_group, "_p_zero") := round(ref_stats$p_zero,4),
+    Residual_SD = round(sigma_resid, 3)
+  )
+  for(g in comparison_groups) {
+    model_summary[[paste0(g,"_slope")]] <- round(comp_stats[[g]]$slope,4)
+    model_summary[[paste0(g,"_p_zero")]] <- round(comp_stats[[g]]$p_zero,4)
+    model_summary[[paste0("p_diff_slopes_", g, "_vs_", reference_group)]] <- round(interaction_pvals[g],4)
+    model_summary[[paste0("Cohen_d_diff_", g, "_vs_", reference_group)]] <- round(cohens_d[g],3)
+  }
+  list(
+    trends = trends,
+    model_summary = model_summary,
+    slope_tests = slope_tests,
+    contrasts_df = contrasts_df
+  )
+}
+
+plot_slopes <- function(model_summary_df,  colors = c("StableCN" = "#00BFC4", "ProgressiveCN" = "#F8766D")) {
+  slope_cols <- grep("_slope$", colnames(model_summary_df), value = TRUE)
+  pval_cols <- grep("_p_zero$", colnames(model_summary_df), value = TRUE)
+  slopes_long <- model_summary_df %>%
+    dplyr::select(Outcome, all_of(slope_cols)) %>%
+    tidyr::pivot_longer(cols = -Outcome, names_to = "Group", values_to = "slope") %>%
+    dplyr::mutate(Group = sub("_slope$", "", Group))
+  pvals_long <- model_summary_df %>%
+    dplyr::select(Outcome, all_of(pval_cols)) %>%
+    tidyr::pivot_longer(cols = -Outcome, names_to = "Group", values_to = "p_value") %>%
+    dplyr::mutate(Group = sub("_p_zero$", "", Group))
+  plot_data <- dplyr::left_join(slopes_long, pvals_long, by = c("Outcome", "Group"))
+  plot_data <- plot_data %>%
+    dplyr::mutate(
+      sig = case_when(
+        p_value < 0.001 ~ "***",
+        p_value < 0.01  ~ "**",
+        p_value <= 0.05 ~ "*",
+        TRUE ~ ""
+      ),
+      label = paste0(round(slope, 3), sig)
+    )
+  if (is.null(colors)) {
+    groups <- unique(plot_data$Group)
+    palette <- scales::hue_pal()(length(groups))
+    colors <- setNames(palette, groups)
+  }
+  dodge_width <- 0.8
+  ggplot(plot_data, aes(x = Outcome, y = slope, fill = Group)) +
+    geom_col(position = position_dodge2(width = dodge_width), width = dodge_width, alpha = 0.8) +
+    geom_text(aes(label = label), position = position_dodge2(width = dodge_width), vjust = -0.5, size = 3) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray") +
+    labs(title = "Annual Change in Outcomes by Group",
+         y = "Slope",
+         x = "Biomarker") +
+    scale_fill_manual(values = colors) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "top")
+}
+
+plot_pvalues <- function(model_summary_df, pvalue_pattern = "^p_diff_slopes") {
+  pval_col <- grep(pvalue_pattern, colnames(model_summary_df), value = TRUE)
+  if(length(pval_col) == 0) stop("No p-value column matching pattern found")
+  if(length(pval_col) > 1) {
+    warning("Multiple p-value columns matched, using the first: ", pval_col[1])
+    pval_col <- pval_col[1]
+  }
+  p_df <- model_summary_df %>%
+    dplyr::select(Outcome, !!rlang::sym(pval_col)) %>%
+    dplyr::rename(p_value = !!rlang::sym(pval_col)) %>%
+    dplyr::mutate(
+      log10_p = -log10(pmax(p_value, 1e-10)),
+      sig = dplyr::case_when(
+        p_value < 0.001 ~ "***",
+        p_value < 0.01  ~ "**",
+        p_value <= 0.05 ~ "*",
+        TRUE ~ ""
+      )
+    ) %>%
+    dplyr::arrange(desc(log10_p))
+  ggplot(p_df, aes(x = reorder(Outcome, log10_p), y = log10_p)) +
+    geom_col(fill = "steelblue", alpha = 0.7) +
+    geom_text(aes(label = paste0(round(p_value, 3), sig)), 
+              hjust = -0.12, size = 3, vjust = -0.2) +
+    geom_hline(yintercept = -log10(0.05), color = "red", linetype = "dashed", alpha = 0.7) +
+    geom_hline(yintercept = -log10(0.01), color = "orange", linetype = "dotted", alpha = 0.5) +
+    geom_hline(yintercept = -log10(0.001), color = "darkred", linetype = "dotdash", alpha = 0.5) +
+    labs(title = "Significance of Group-by-Time Interaction",
+         subtitle = "Dashed line: p = 0.05 | Dotted: p = 0.01 | Dash-dot: p = 0.001",
+         y = expression(-log10),
+         x = "Outcome") +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.margin = margin(t = 10, r = 50, b = 10, l = 10),
+      plot.subtitle = element_text(size = 9, color = "gray50")
+    ) +
+    coord_cartesian(clip = "off")
+}
+
+# --- 5. Run model for each available biomarker
+results <- lapply(biomarkers_ok, function(var) {
+  analyze_longitudinal_trends(df_long.analysis,
+                             response = var,
+                             xvar = "elapsed_years",
+                             groupvar = "Change_Type",
+                             covariates = c("AGE", "SEX", "EDUYR"),
+                             subject_id = "USUBJID",
+                             time_points_input = c(0,1,2,3,4,5,6),
+                             reference_group = "StableCN",
+                             comparison_groups = "ProgressiveCN")
+})
+
+results_ok <- Filter(Negate(is.null), results)
+
+# --- 6. Extract summary tables only (DO NOT combine lists directly!)
+model_summaries <- lapply(results_ok, function(res) res$model_summary)
+model_summary_df <- dplyr::bind_rows(model_summaries)
+
+# --- 7. Visualize
+if (nrow(model_summary_df) > 0) {
+  plot_slopes(model_summary_df)
+  plot_pvalues(model_summary_df)
+}
+
+# --- 8. Example: Plot trajectory for one variable (e.g. "whr", or first in list)
+if (length(biomarkers_ok) > 0) {
+  plot_lmer_predictions_with_stats(df_long.analysis, response = biomarkers_ok[1])
+}
+
+# --- 9. Print summaries
+print(model_summary_df)
+
+
+```
+
+
