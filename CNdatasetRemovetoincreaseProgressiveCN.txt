@@ -7,5 +7,7 @@ increasing number of CNtransitMCI
 8278 Remove F_385
 5610 Remove a_281
 
+(E_237, F_242, a_531, E_391 , G_31, F_385, a_281)
+
 Remove < 6 months (0.9 months)
 11329 Remove C_015 , K_081

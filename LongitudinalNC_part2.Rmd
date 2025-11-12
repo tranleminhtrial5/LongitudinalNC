@@ -1,0 +1,225 @@
+---
+title: "Longitudinal trajectories of segmental bioimpedance and cognitive conversion in older adults - Part 1"
+output: html_notebook
+---
+
+Longitudinal trajectories of segmental bioimpedance and cognitive conversion in older adults
+
+------------------------------------------------------------------------
+
+```{r}
+# Data manipulation
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(lubridate)
+library(stringr)
+
+# Visualization
+library(ggplot2)
+library(cowplot)
+library(ggpubr)
+library(patchwork)
+library(sjPlot)
+
+# Statistical analysis
+library(lme4)
+library(lmerTest)
+library(rstatix)
+library(effectsize)
+library(emmeans)
+library(broom)
+library(broom.mixed)
+
+# Reporting
+library(gtsummary)
+library(flextable)
+library(summarytools)
+
+```
+
+Required Libraries
+
+```{r}
+df <- read.csv("Chosun5yBIApreprocess.csv", stringsAsFactors = FALSE)
+
+remove_list <- c("E_237", "F_242", "a_531", "E_391", "G_31", "F_385", "a_281")
+df <- df %>% filter(!(k_no %in% remove_list))
+
+df <- df %>%
+  mutate(datetest = as.Date(datetest, format = "%m/%d/%Y"))
+
+df2 <- df %>%
+  group_by(USUBJID) %>%
+  filter(n() >= 2) %>%
+  ungroup()
+
+df2 <- df2 %>%
+  arrange(USUBJID, datetest)
+
+df3 <- df2 %>%
+  group_by(USUBJID) %>%
+  mutate(
+    Initial_Status = first(diagnosis),
+    Final_Status = last(diagnosis),
+    Transition     = paste(Initial_Status, "-", Final_Status),
+    Change_Type    = case_when(
+      Initial_Status == "CN"  & Final_Status == "CN"  ~ "StableCN",
+      Initial_Status == "CN"  & Final_Status == "MCI" ~ "CNtransitMCI",
+      Initial_Status == "MCI" & Final_Status == "CN"  ~ "MCItransitCN",
+      Initial_Status == "MCI" & Final_Status == "MCI" ~ "StableMCI",
+      Initial_Status == "MCI" & Final_Status == "AD"  ~ "MCItransitAD",
+      Initial_Status == "CN"  & Final_Status == "AD"  ~ "CNtransitAD",
+      Initial_Status == "AD"  & Final_Status == "MCI" ~ "ADtransitMCI",
+      Initial_Status == "AD"  & Final_Status == "CN"  ~ "ADtransitCN",
+      Initial_Status == "AD"  & Final_Status == "AD"  ~ "StableAD",
+      TRUE ~ NA_character_
+    ),
+    visit_count = n(),
+    baseline_date = first(datetest),
+    elapsed_years = as.numeric(difftime(datetest, baseline_date, units = "days")) / 365.25,
+    elapsed_years_First_to_Last = as.numeric(difftime(last(datetest), first(datetest), units = "days")) / 365.25
+  ) %>%
+  ungroup()
+
+df4 <- df3 %>%
+  filter(elapsed_years_First_to_Last >= 0.5)
+```
+
+```{r}
+# Step 8: Summarise transition groups
+group_counts <- df4 %>%
+  group_by(Transition, Change_Type) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+print(head(df4))
+print(group_counts)
+
+# Unique participant-level summary for each Transition and Change_Type group
+participant_group_summary <- df4 %>%
+  group_by(USUBJID) %>%
+  summarise(
+    Transition = first(Transition),
+    Change_Type = first(Change_Type)
+  ) %>%
+  group_by(Transition, Change_Type) %>%
+  summarise(
+    n_participants = n(),
+    participants = paste(USUBJID, collapse = ", ")
+  ) %>%
+  ungroup()
+
+print(participant_group_summary)
+
+```
+
+```{r}
+df_baseline <- df4 %>%
+  filter(Change_Type %in% c("StableCN", "CNtransitMCI"))
+
+df_baseline <- df_baseline %>%
+  group_by(USUBJID) %>%
+  filter(datetest == min(datetest)) %>%
+  ungroup()
+
+#write.csv(df_baseline, "df_baseline.csv",row.names = FALSE)
+```
+
+```{r}
+library(dplyr)
+library(tableone)
+library(ggplot2)
+library(effsize) # for Cohen's d if needed
+
+# Ensure group variable and factors
+df_baseline$SEX <- as.factor(df_baseline$SEX)
+df_baseline$Change_Type <- as.factor(df_baseline$Change_Type)
+
+# Variable sets
+vars_table1 <- c('SEX','AGE','EDUYR','gds','kdsq','visitcount',
+                 'MMSE','SNSB_attention','SNSB_language','SNSB_visuospatial','SNSB_memory','SNSB_frontal')
+vars_table2 <- c('height','weight','Waistcir','Hipcir','sysbp','diabp','bmi','ac','whr',
+                 'pbcm','pbf','bmr','tbw_ffm','ecw_tcw')
+vars_table3 <- c('PA50_total','ECW_ICW_upper','ECW_ICW_lower',
+                 'Water_Lean_upper','Water_Lean_lower','R_upper','R_lower','Xc_upper','Xc_lower',
+                 'PA_upper','PA_lower','R_H_upper','R_H_lower','Xc_H_upper','Xc_H_lower')
+group_var <- "Change_Type"
+
+# Table summaries
+tab1 <- CreateTableOne(vars=vars_table1, strata=group_var, data=df_baseline)
+print(tab1, showAllLevels=TRUE, quote=TRUE, noSpaces=TRUE)
+
+tab2 <- CreateTableOne(vars=vars_table2, strata=group_var, data=df_baseline)
+print(tab2, showAllLevels=TRUE, quote=TRUE, noSpaces=TRUE)
+
+tab3 <- CreateTableOne(vars=vars_table3, strata=group_var, data=df_baseline)
+print(tab3, showAllLevels=TRUE, quote=TRUE, noSpaces=TRUE)
+
+
+# Group comparisons with robust NA handling
+get_pvals <- function(varlist, groupvar, df) {
+  result <- sapply(varlist, function(v) {
+    vals <- df[[v]]
+    g <- df[[groupvar]]
+
+    # Remove cases with NA in either vector
+    non_missing <- !(is.na(vals) | is.na(g))
+    vals_nomiss <- vals[non_missing]
+    g_nomiss <- g[non_missing]
+
+    if (length(unique(g_nomiss)) != 2) return(NA) # Only handle two groups
+
+    # If numeric/categorical
+    if (is.numeric(vals_nomiss)) {
+      p_norm <- shapiro.test(vals_nomiss)$p.value
+      if (p_norm > 0.05) {
+        ttest <- t.test(vals_nomiss ~ g_nomiss)
+        return(ttest$p.value)
+      } else {
+        wilc <- wilcox.test(vals_nomiss ~ g_nomiss)
+        return(wilc$p.value)
+      }
+    } else {
+      tbl <- table(vals_nomiss, g_nomiss)
+      if (any(tbl < 5)) {
+        return(fisher.test(tbl)$p.value)
+      } else {
+        return(chisq.test(tbl)$p.value)
+      }
+    }
+  })
+  return(result)
+}
+
+pvals_table1 <- get_pvals(vars_table1, group_var, df_baseline)
+pvals_table2 <- get_pvals(vars_table2, group_var, df_baseline)
+pvals_table3 <- get_pvals(vars_table3, group_var, df_baseline)
+
+print(pvals_table1)
+print(pvals_table2)
+print(pvals_table3)
+
+# Adjusted comparisons (ANCOVA example)
+ancova_result <- summary(lm(R_lower ~ Change_Type + AGE + SEX + EDUYR, data = df_baseline, na.action = na.exclude))
+print(ancova_result)
+
+# Effect size: Cohen's d (robust NA-handling)
+cohen_d <- function(var, group, data) {
+  vals <- data[[var]]
+  g <- data[[group]]
+  non_missing <- !(is.na(vals) | is.na(g))
+  effsize::cohen.d(vals[non_missing], g[non_missing])
+}
+cohen_d("AGE", group_var, df_baseline)
+
+# Example plot: Violin plot for a key biomarker
+ggplot(df_baseline, aes(x=Change_Type, y=R_lower, fill=Change_Type)) +
+  geom_violin(trim=FALSE) +
+  geom_boxplot(width=0.1, fill="white") +
+  labs(title="R_lower by Group", y="R_lower")
+
+write.csv(print(tab1, quote = TRUE, noSpaces = TRUE), "table1_baseline.csv")
+write.csv(print(tab2, quote = TRUE, noSpaces = TRUE), "table2_baseline.csv")
+write.csv(print(tab3, quote = TRUE, noSpaces = TRUE), "table3_baseline.csv")
+```
