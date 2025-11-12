@@ -85,7 +85,7 @@ df3 <- df2 %>%
   ungroup()
 
 df4 <- df3 %>%
-  filter(elapsed_years_First_to_Last >= 0.5)
+  filter(elapsed_years_First_to_Last >= 0.916666666)
 ```
 
 ```{r}
@@ -240,11 +240,15 @@ ggplot(df_baseline, aes(x=Change_Type, y=R_lower, fill=Change_Type)) +
   labs(title="R_lower by Group", y="R_lower") +
   theme_minimal()
 
-write.csv(print(tab1, quote = TRUE, noSpaces = TRUE), "table1_baseline.csv")
-
+#write.csv(print(tab1, quote = TRUE, noSpaces = TRUE), "table1_baseline.csv")
 tbl2_results <- sapply(names(ancova_tab2), function(var) c(Estimate = ancova_tab2[[var]]$estimate, Pvalue = ancova_tab2[[var]]$pval))
-write.csv(tbl2_results, "table2_ancova.csv")
+#write.csv(tbl2_results, "table2_ancova.csv")
 tbl3_results <- sapply(names(ancova_tab3), function(var) c(Estimate = ancova_tab3[[var]]$estimate, Pvalue = ancova_tab3[[var]]$pval))
-write.csv(tbl3_results, "table3_ancova.csv")
+#write.csv(tbl3_results, "table3_ancova.csv")
+
+```
+
+```{r}
+
 
 ```
