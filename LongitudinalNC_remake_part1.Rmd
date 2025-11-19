@@ -35,7 +35,9 @@ library(gtsummary)
 library(flextable)
 library(summarytools)
 library(tableone)
-library(effsize) 
+library(effsize)
+library(scales)
+library(tidyverse)
 
 ```
 
@@ -86,9 +88,7 @@ df3 <- df2 %>%
 df4 <- df3 %>%
   filter(elapsed_years_First_to_Last >= 0.916666666)
 #write.csv(df4, "df4.csv",row.names = FALSE)
-```
 
-```{r}
 group_counts <- df4 %>%
   group_by(Transition, Change_Type) %>%
   summarise(count = n()) %>%
@@ -125,11 +125,6 @@ df_baseline <- df_baseline %>%
   ungroup()
 
 #write.csv(df_baseline, "df_baseline.csv",row.names = FALSE)
-```
-
-```{r}
-library(tableone)
-library(effsize)
 
 df_baseline$SEX <- as.factor(df_baseline$SEX)
 df_baseline$Change_Type <- as.factor(df_baseline$Change_Type)
@@ -248,10 +243,6 @@ tbl3_results <- sapply(names(ancova_tab3), function(var) c(Estimate = ancova_tab
 ```
 
 ```{r}
-library(tidyverse)
-library(ggplot2)
-library(cowplot)
-
 bia_vars <- c("MMSE","SNSB_attention","SNSB_language", "SNSB_visuospatial", "SNSB_memory", "SNSB_frontal","bmi","whr","pbcm","pbf","bmr","ecw_tcw","tbw_ffm","PA50_total",
               "ECW_ICW_upper","ECW_ICW_lower","Water_Lean_upper","Water_Lean_lower",
               "R_upper","R_lower","Xc_upper","Xc_lower",
@@ -274,9 +265,300 @@ do.call(cowplot::plot_grid, c(spaghetti_plots[1:9], ncol = 3))
 
 print(spaghetti_plots[[1]])   
 
-for(i in seq_along(bia_vars)) {
+#for(i in seq_along(bia_vars)) {
   ggsave(filename = paste0("spaghetti_", bia_vars[i], ".png"),
          plot = spaghetti_plots[[i]], width = 6, height = 4)
-}
+#}
 ```
 
+```{r}
+analyze_longitudinal_trends <- function(
+  data, response, xvar = "elapsed_years", groupvar = "Change_Type",
+  covariates = c("AGE", "SEX", "EDUYR"), subjectid = "USUBJID",
+  referencegroup = NULL, comparisongroups = NULL
+) {
+  library(lmerTest); library(emmeans); library(broom.mixed); library(dplyr)
+  data[[groupvar]] <- as.factor(data[[groupvar]])
+  levels_grp <- levels(data[[groupvar]])
+  if(is.null(referencegroup)) referencegroup <- levels_grp[1]
+  if(is.null(comparisongroups)) comparisongroups <- setdiff(levels_grp, referencegroup)
+  if(referencegroup %in% levels_grp) data[[groupvar]] <- relevel(data[[groupvar]], ref=referencegroup)
+
+  # Build and fit model
+  formula_str <- paste0(
+    response, " ~ ", xvar, "*", groupvar, " + ",
+    paste(covariates, collapse = " + "), " + (1 + ", xvar, "|", subjectid, ")"
+  )
+  mod <- lmerTest::lmer(as.formula(formula_str), data = data)
+  sigma_resid <- sigma(mod)
+  emt <- emtrends(mod, specs = groupvar, var = xvar)
+  sum_emt <- summary(emt, infer = TRUE)
+  slope_tests <- sum_emt %>% dplyr::rename(slope = !!paste0(xvar, ".trend"), group = !!groupvar)
+  refstats <- slope_tests %>% filter(group == referencegroup)
+  compstats <- lapply(comparisongroups, function(g) slope_tests %>% filter(group == g))
+  names(compstats) <- comparisongroups
+
+  # --- KEY FIX: Robust pattern matching for interaction term ---
+  fe <- broom.mixed::tidy(mod, effects="fixed") %>% dplyr::select(term, p.value)
+  interaction_p <- sapply(comparisongroups, function(g) {
+    # Look for any term that has both elapsed_years and group label
+    patt1 <- paste0(":", groupvar, g)
+    patt2 <- paste0(groupvar, g, ":")
+    possible <- fe$term[grepl("elapsed_years", fe$term) & grepl(g, fe$term)]
+    if(length(possible) > 0) {
+      # Take the first (should only be one)
+      pval <- fe %>% filter(term == possible[1]) %>% pull(p.value)
+      as.numeric(pval[1])
+    } else {
+      NA_real_
+    }
+  })
+
+  cohensd <- sapply(comparisongroups, function(g) {
+    comp <- compstats[[g]]$slope
+    ref <- refstats$slope
+    abs((comp - ref)/sigma_resid)
+  })
+
+  modelsummary <- tibble::tibble(
+    Outcome = response,
+    Measure = "Annual change (slope)",
+    !!paste0(referencegroup, "_slope") := round(refstats$slope,4),
+    !!paste0(referencegroup, "_p") := round(refstats$p.value,4),
+    ResidualSD = round(sigma_resid, 3),
+    dplyr::bind_cols(
+      setNames(lapply(comparisongroups, function(g) round(compstats[[g]]$slope,4)), paste0(comparisongroups,"_slope")),
+      setNames(lapply(comparisongroups, function(g) round(compstats[[g]]$p.value,4)), paste0(comparisongroups,"_p")),
+      setNames(lapply(comparisongroups, function(g) round(interaction_p[g],4)), paste0("pdiffslopes_", comparisongroups, "_vs_", referencegroup)),
+      setNames(lapply(comparisongroups, function(g) round(cohensd[g],3)), paste0("Cohen_d_", comparisongroups, "_vs_", referencegroup))
+    )
+  )
+  list(modelsummary=modelsummary, model=mod, slopetests=slope_tests)
+}
+
+
+```
+
+```{r}
+plot_lmer_model_with_interaction_p <- function(
+  data, response, xvar = "elapsed_years", groupvar = "Change_Type",
+  covariates = c("AGE", "SEX", "EDUYR"), colors = NULL, npoints = 100
+) {
+  library(lmerTest); library(ggplot2); library(ggeffects)
+  
+  formula_str <- paste0(
+    response, " ~ ", xvar, "*", groupvar, " + ",
+    paste(covariates, collapse = " + "), " + (1 + ", xvar, "|USUBJID)"
+  )
+  mod <- lmerTest::lmer(as.formula(formula_str), data = data)
+  pred <- ggeffects::ggpredict(mod, terms = c(paste0(xvar), paste0(groupvar)))
+  coefmat <- coef(summary(mod))
+  cname <- grep(paste0(xvar, ":", groupvar), rownames(coefmat), value=TRUE)
+  pstr <- if(length(cname)==1) paste("Interaction p =", formatC(coefmat[cname, "Pr(>|t|)"], format = "e", digits = 2)) else "Interaction p = NA"
+  # Colors
+  if(is.null(colors)) {
+    colors <- scales::hue_pal()(length(unique(data[[groupvar]])))
+    names(colors) <- unique(data[[groupvar]])
+  }
+  ggplot(data, aes_string(x = xvar, y = response, color = groupvar, group = "USUBJID")) +
+    geom_line(alpha = 0.3, size = 0.6) +
+    geom_line(data = pred, aes(x = x, y = predicted, color = group, group = group), size = 1.5, inherit.aes=FALSE) +
+    scale_color_manual(values=colors) +
+    labs(
+      title = paste0(response, ": Group trajectories"),
+      subtitle = pstr, y = response, x = xvar
+    ) +
+    theme_minimal()
+}
+
+```
+
+```{r}
+library(cowplot)
+
+biavars <- c(
+  "MMSE", "SNSB_attention", "SNSB_language", "SNSB_visuospatial", "SNSB_memory", "SNSB_frontal",
+  "bmi", "whr", "pbcm", "pbf", "bmr", "ecw_tcw", "tbw_ffm", "PA50_total",
+  "ECW_ICW_upper", "ECW_ICW_lower", "Water_Lean_upper", "Water_Lean_lower",
+  "R_upper", "R_lower", "Xc_upper", "Xc_lower",
+  "PA_upper", "PA_lower", "R_H_upper", "R_H_lower", "Xc_H_upper", "Xc_H_lower"
+)
+referencegroup <- "StableCN"
+comparisongroups <- c("CNtransitMCI")
+colors.legend <- c("StableCN"="#00BFC4","CNtransitMCI"="#F8766D")
+
+# --- Your batch analysis ---
+results <- lapply(biavars, function(var) 
+  analyze_longitudinal_trends(
+    data = df_long.analysis,
+    response = var,
+    groupvar = "Change_Type",
+    referencegroup = referencegroup,
+    comparisongroups = comparisongroups
+  )
+)
+modelsummarylist <- lapply(results, function(x)x$modelsummary)
+allsummaries <- dplyr::bind_rows(modelsummarylist, .id = "Biomarker")
+write.csv(allsummaries,"Bioimpedance_LME_summary.csv",row.names = FALSE)
+
+# --- Trajectory plotting (unchanged) ---
+plot_lmer_model_with_interaction_p <- function(
+  data, response, xvar = "elapsed_years", groupvar = "Change_Type",
+  covariates = c("AGE", "SEX", "EDUYR"), colors = NULL, npoints = 100
+) {
+  formula_str <- paste0(
+    response, " ~ ", xvar, "*", groupvar, " + ",
+    paste(covariates, collapse = " + "), " + (1 + ", xvar, "|USUBJID)"
+  )
+  mod <- lmerTest::lmer(as.formula(formula_str), data = data)
+  pred <- ggeffects::ggpredict(mod, terms = c(paste0(xvar), paste0(groupvar)))
+  coefmat <- coef(summary(mod))
+  cname <- grep(paste0(xvar, ":", groupvar), rownames(coefmat), value=TRUE)
+  raw_pval <- if(length(cname)==1) coefmat[cname, "Pr(>|t|)"] else NA
+  signif_star <- if (!is.na(raw_pval)) {
+    if (raw_pval < 0.001) "***"
+    else if (raw_pval < 0.01) "**"
+    else if (raw_pval < 0.05) "*"
+    else ""
+  } else ""
+  pstr <- if(!is.na(raw_pval)) paste0("Interaction p = ", formatC(raw_pval, digits = 3, format = "f"), " ", signif_star) else "Interaction p = NA"
+  if(is.null(colors)) {
+    colors <- scales::hue_pal()(length(unique(data[[groupvar]])))
+    names(colors) <- unique(data[[groupvar]])
+  }
+  ggplot(data, aes_string(x = xvar, y = response, color = groupvar, group = "USUBJID")) +
+    geom_line(alpha = 0.3, size = 0.6) +
+    geom_line(data = pred, aes(x = x, y = predicted, color = group, group = group), size = 1.5, inherit.aes=FALSE) +
+    scale_color_manual(values=colors) +
+    labs(
+      title = paste0(response, ": Group trajectories"),
+      subtitle = pstr, y = response, x = xvar
+    ) +
+    theme_minimal()
+}
+
+output_dir <- "Bioimpedance_Trajectory_Plots"
+dir.create(output_dir, showWarnings = FALSE)
+
+plots <- lapply(biavars, function(var) {
+  plot_lmer_model_with_interaction_p(
+    data = df_long.analysis,
+    response = var,
+    colors = colors.legend
+  )
+})
+
+for (i in seq_along(biavars)) {
+  p <- plots[[i]]
+  if (inherits(p, "ggplot")) {
+    ggsave(
+      filename = file.path(output_dir, paste0(biavars[i], "_trajectory.png")),
+      plot = p,
+      width = 7, height = 5, dpi = 300
+    )
+  }
+}
+
+
+```
+
+```{r}
+plot_lmer_interaction_with_p <- function(
+  data, response, xvar = "elapsed_years", groupvar = "Change_Type",
+  covariates = c("AGE", "SEX", "EDUYR"),
+  subjectid = "USUBJID",
+  colors = c("StableCN"="#00BFC4", "CNtransitMCI"="#F8766D"),
+  npoints = 100,
+  show.legend = FALSE
+) {
+  library(lmerTest); library(ggplot2)
+  formula_full <- paste0(response, " ~ ", xvar, "*", groupvar, " + ",
+                         paste(covariates, collapse = " + "), " + (1 + ", xvar, "|", subjectid, ")")
+  formula_noint <- paste0(response, " ~ ", xvar, " + ", groupvar, " + ",
+                         paste(covariates, collapse = " + "), " + (1 + ", xvar, "|", subjectid, ")")
+  mod_full <- lmerTest::lmer(as.formula(formula_full), data = data, REML=FALSE)
+  mod_noint <- lmerTest::lmer(as.formula(formula_noint), data = data, REML=FALSE)
+  lrt <- anova(mod_noint, mod_full)
+  # Likelihood ratio omnibus p
+  omnibus_p <- lrt$`Pr(>Chisq)`[2]
+  chisq_val <- lrt$Chisq[2]
+  df_val <- lrt$Df[2]
+  sigstars <- function(p) if(p < 0.001) "***" else if(p < 0.01) "**" else if(p < 0.05) "*" else ""
+  omnibus_label <- sprintf("Interaction: Chi^2 = %.2f, df = %d, p = %.3g %s", chisq_val, df_val, omnibus_p, sigstars(omnibus_p))
+
+  # Individual interaction p
+  coefsum <- summary(mod_full)$coefficients
+  int_rows <- grep(paste0(xvar, ":", groupvar), rownames(coefsum), value=TRUE)
+  int_annot <- ""
+  if(length(int_rows) > 0) {
+    vals <- sapply(int_rows, function(n) {
+      pval <- coefsum[n, "Pr(>|t|)"]
+      nm <- gsub(paste0(xvar, ":", groupvar), "", n)
+      nm <- gsub(groupvar, "", nm)
+      paste0("p_", nm, " = ", formatC(pval, digits=3, format='f'), sigstars(pval))
+    })
+    int_annot <- paste(vals, collapse=" | ")
+  }
+
+  # Prediction grid
+  xseq <- seq(min(data[[xvar]], na.rm=TRUE), max(data[[xvar]], na.rm=TRUE), length.out = npoints)
+  grid <- expand.grid(
+    elapsed_years = xseq,
+    Change_Type = levels(factor(data[[groupvar]]))
+  )
+  for(cov in covariates) {
+    if(is.numeric(data[[cov]])) grid[[cov]] <- median(data[[cov]], na.rm=TRUE)
+    else grid[[cov]] <- levels(factor(data[[cov]]))[1]
+  }
+  pred <- predict(mod_full, newdata = grid, re.form=NA)
+  grid$predicted <- pred
+
+  p <- ggplot() +
+    geom_line(data = data, aes_string(x = xvar, y = response, color = groupvar, group = subjectid), alpha = 0.25, size = 0.6) +
+    geom_line(data = grid, aes_string(x = "elapsed_years", y = "predicted", color = "Change_Type", group = "Change_Type"), size = 2) +
+    scale_color_manual(values=colors) +
+    labs(
+      title = paste0(response, ": Group trajectories"),
+      subtitle = paste(omnibus_label, int_annot, sep = "\n"),
+      y = response, x = xvar
+    ) +
+    theme_minimal()
+  if (!show.legend) p <- p + theme(legend.position="none")
+  return(p)
+}
+
+biavars_2 <- c(
+  "MMSE", "SNSB_attention", "SNSB_language", "SNSB_visuospatial", "SNSB_memory", "SNSB_frontal","bmi", "whr", "pbcm", "pbf", "bmr", "ecw_tcw", "tbw_ffm", "PA50_total",
+  "ECW_ICW_upper", "ECW_ICW_lower", "Water_Lean_upper", "Water_Lean_lower",
+  "R_upper", "R_lower", "Xc_upper", "Xc_lower", "PA_upper", "PA_lower",
+  "R_H_upper", "R_H_lower", "Xc_H_upper", "Xc_H_lower"
+)
+colors.legend_2 <- c("StableCN"="#00BFC4","CNtransitMCI"="#F8766D")
+
+plots_interaction_2 <- lapply(biavars_2, function(var)
+  plot_lmer_interaction_with_p(
+    data = df_long.analysis,
+    response = var,
+    colors = colors.legend_2,
+    show.legend = FALSE
+  )
+)
+
+cowplot::plot_grid(plotlist = plots_interaction_2[1:6], ncol = 2)
+
+# Export all interaction plots (no filename collision)
+output_dir_2 <- "Bioimpedance_Trajectory_InteractionPlots"
+if (!dir.exists(output_dir_2)) dir.create(output_dir_2)
+for (i in seq_along(biavars_2)) {
+  var <- biavars_2[i]
+  p <- plots_interaction_2[[i]]
+  if (!is.null(p)) {
+    ggsave(
+      filename = file.path(output_dir_2, paste0(var, "_interactionplot.png")),
+      plot = p,
+      width = 7, height = 5, dpi = 300
+    )
+  }
+}
+
+```
