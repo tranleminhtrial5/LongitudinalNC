@@ -41,8 +41,6 @@ library(tidyverse)
 
 ```
 
-Required Libraries
-
 ```{r}
 df <- read.csv("Chosun5yBIApreprocess.csv", stringsAsFactors = FALSE)
 
@@ -266,299 +264,279 @@ do.call(cowplot::plot_grid, c(spaghetti_plots[1:9], ncol = 3))
 print(spaghetti_plots[[1]])   
 
 #for(i in seq_along(bia_vars)) {
-  ggsave(filename = paste0("spaghetti_", bia_vars[i], ".png"),
-         plot = spaghetti_plots[[i]], width = 6, height = 4)
+#  ggsave(filename = paste0("spaghetti_", bia_vars[i], ".png"),
+#         plot = spaghetti_plots[[i]], width = 6, height = 4)
 #}
 ```
-
 ```{r}
-analyze_longitudinal_trends <- function(
+# --- Libraries ---
+library(lmerTest)
+library(emmeans)
+library(dplyr)
+library(tibble)
+library(ggeffects)
+library(forcats)
+
+df_long.analysis$Change_Type <- as.factor(df_long.analysis$Change_Type)
+df_long.analysis$Change_Type <- fct_recode(
+  df_long.analysis$Change_Type,
+  StableCN = "StableCN", 
+  CNtransitMCI = "CNtransitMCI"
+)
+print(levels(df_long.analysis$Change_Type)) 
+print(table(df_long.analysis$Change_Type, useNA = "always"))
+
+referencegroup <- "StableCN"
+comparisongroups <- c("CNtransitMCI")
+
+# --- Core Analysis Function: LME + LRT + Wald ---
+analyze_longitudinal_trends_LRT <- function(
   data, response, xvar = "elapsed_years", groupvar = "Change_Type",
   covariates = c("AGE", "SEX", "EDUYR"), subjectid = "USUBJID",
-  referencegroup = NULL, comparisongroups = NULL
+  referencegroup, comparisongroups
 ) {
-  library(lmerTest); library(emmeans); library(broom.mixed); library(dplyr)
-  data[[groupvar]] <- as.factor(data[[groupvar]])
-  levels_grp <- levels(data[[groupvar]])
-  if(is.null(referencegroup)) referencegroup <- levels_grp[1]
-  if(is.null(comparisongroups)) comparisongroups <- setdiff(levels_grp, referencegroup)
-  if(referencegroup %in% levels_grp) data[[groupvar]] <- relevel(data[[groupvar]], ref=referencegroup)
+  # Validate group levels first
+  levels_grp <- levels(as.factor(data[[groupvar]]))
+  if (!referencegroup %in% levels_grp) stop(paste("Reference group", referencegroup, "not found in levels"))
+  if (any(!comparisongroups %in% levels_grp)) stop(paste("Comparison group(s)", paste(comparisongroups[!comparisongroups %in% levels_grp], collapse=", "), "not found in levels"))
 
-  # Build and fit model
-  formula_str <- paste0(
-    response, " ~ ", xvar, "*", groupvar, " + ",
-    paste(covariates, collapse = " + "), " + (1 + ", xvar, "|", subjectid, ")"
+  # Set reference level for modeling
+  data[[groupvar]] <- as.factor(data[[groupvar]])
+  data[[groupvar]] <- relevel(data[[groupvar]], ref = referencegroup)
+  
+  # Model formulas
+  formula_full <- as.formula(
+    paste0(response, " ~ ", xvar, "*", groupvar, " + ", paste(covariates, collapse = " + "), 
+           " + (1 + ", xvar, "|", subjectid, ")")
   )
-  mod <- lmerTest::lmer(as.formula(formula_str), data = data)
-  sigma_resid <- sigma(mod)
-  emt <- emtrends(mod, specs = groupvar, var = xvar)
+  formula_noint <- as.formula(
+    paste0(response, " ~ ", xvar, " + ", groupvar, " + ", paste(covariates, collapse = " + "), 
+           " + (1 + ", xvar, "|", subjectid, ")")
+  )
+  
+  # Check for all NA or missing column
+  if (!response %in% names(data) || all(is.na(data[[response]]))) {
+    warning(paste("Skipping", response, "because data is missing or all NA"))
+    return(list(modelsummary = tibble(Outcome = response, Comparison = paste(comparisongroups, "vs", referencegroup),
+                                         Slope_Ref = NA, Slope_Comp = NA, Slope_Diff = NA,
+                                         Slope_SE = NA, Slope_Lower = NA, Slope_Upper = NA,
+                                         Slope_p = NA, Cohen_d = NA, Wald_p = NA,
+                                         LRT_p = NA, LRT_chi = NA, LRT_df = NA, ResidualSD = NA)))
+  }
+  
+  # Fit models
+  mod_full <- tryCatch(lmerTest::lmer(formula_full, data = data, REML=FALSE), error = function(e) NA)
+  mod_noint <- tryCatch(lmerTest::lmer(formula_noint, data = data, REML=FALSE), error = function(e) NA)
+  if (any(is.na(c(mod_full, mod_noint)))) {
+    warning(paste("Model fit failed for", response))
+    return(list(modelsummary = tibble(Outcome = response, Comparison = paste(comparisongroups, "vs", referencegroup),
+                                         Slope_Ref = NA, Slope_Comp = NA, Slope_Diff = NA,
+                                         Slope_SE = NA, Slope_Lower = NA, Slope_Upper = NA,
+                                         Slope_p = NA, Cohen_d = NA, Wald_p = NA,
+                                         LRT_p = NA, LRT_chi = NA, LRT_df = NA, ResidualSD = NA)))
+  }
+  
+  # LRT p-value
+  lrt <- anova(mod_noint, mod_full)
+  lrt_p <- lrt$`Pr(>Chisq)`[2]
+  lrt_chi <- lrt$Chisq[2]
+  lrt_df <- lrt$Df[2]
+  
+  # Wald p-value
+  coefmat <- coef(summary(mod_full))
+  interaction_row <- grep(paste0(xvar, ":", groupvar), rownames(coefmat), value = TRUE)
+  wald_p <- if(length(interaction_row) > 0) coefmat[interaction_row, "Pr(>|t|)"] else NA_real_
+  
+  # Slope extraction
+  emt <- emmeans::emtrends(mod_full, specs = groupvar, var = xvar)
   sum_emt <- summary(emt, infer = TRUE)
   slope_tests <- sum_emt %>% dplyr::rename(slope = !!paste0(xvar, ".trend"), group = !!groupvar)
   refstats <- slope_tests %>% filter(group == referencegroup)
   compstats <- lapply(comparisongroups, function(g) slope_tests %>% filter(group == g))
   names(compstats) <- comparisongroups
+  
+  # Slope difference & 95% CI
+  contrast_out <- emmeans::contrast(emt, method = "revpairwise")
+  sum_contrast <- summary(contrast_out, infer = TRUE)
 
-  # --- KEY FIX: Robust pattern matching for interaction term ---
-  fe <- broom.mixed::tidy(mod, effects="fixed") %>% dplyr::select(term, p.value)
-  interaction_p <- sapply(comparisongroups, function(g) {
-    # Look for any term that has both elapsed_years and group label
-    patt1 <- paste0(":", groupvar, g)
-    patt2 <- paste0(groupvar, g, ":")
-    possible <- fe$term[grepl("elapsed_years", fe$term) & grepl(g, fe$term)]
-    if(length(possible) > 0) {
-      # Take the first (should only be one)
-      pval <- fe %>% filter(term == possible[1]) %>% pull(p.value)
-      as.numeric(pval[1])
-    } else {
-      NA_real_
-    }
-  })
-
+  # Effect size
+  sigma_resid <- suppressWarnings(sigma(mod_full))
   cohensd <- sapply(comparisongroups, function(g) {
     comp <- compstats[[g]]$slope
     ref <- refstats$slope
-    abs((comp - ref)/sigma_resid)
+    if (length(comp)==0 || length(ref)==0 || is.na(sigma_resid)) {
+      NA
+    } else {
+      abs((comp - ref)/sigma_resid)
+    }
   })
-
-  modelsummary <- tibble::tibble(
-    Outcome = response,
-    Measure = "Annual change (slope)",
-    !!paste0(referencegroup, "_slope") := round(refstats$slope,4),
-    !!paste0(referencegroup, "_p") := round(refstats$p.value,4),
-    ResidualSD = round(sigma_resid, 3),
-    dplyr::bind_cols(
-      setNames(lapply(comparisongroups, function(g) round(compstats[[g]]$slope,4)), paste0(comparisongroups,"_slope")),
-      setNames(lapply(comparisongroups, function(g) round(compstats[[g]]$p.value,4)), paste0(comparisongroups,"_p")),
-      setNames(lapply(comparisongroups, function(g) round(interaction_p[g],4)), paste0("pdiffslopes_", comparisongroups, "_vs_", referencegroup)),
-      setNames(lapply(comparisongroups, function(g) round(cohensd[g],3)), paste0("Cohen_d_", comparisongroups, "_vs_", referencegroup))
-    )
-  )
-  list(modelsummary=modelsummary, model=mod, slopetests=slope_tests)
-}
-
-
-```
-
-```{r}
-plot_lmer_model_with_interaction_p <- function(
-  data, response, xvar = "elapsed_years", groupvar = "Change_Type",
-  covariates = c("AGE", "SEX", "EDUYR"), colors = NULL, npoints = 100
-) {
-  library(lmerTest); library(ggplot2); library(ggeffects)
   
-  formula_str <- paste0(
-    response, " ~ ", xvar, "*", groupvar, " + ",
-    paste(covariates, collapse = " + "), " + (1 + ", xvar, "|USUBJID)"
-  )
-  mod <- lmerTest::lmer(as.formula(formula_str), data = data)
-  pred <- ggeffects::ggpredict(mod, terms = c(paste0(xvar), paste0(groupvar)))
-  coefmat <- coef(summary(mod))
-  cname <- grep(paste0(xvar, ":", groupvar), rownames(coefmat), value=TRUE)
-  pstr <- if(length(cname)==1) paste("Interaction p =", formatC(coefmat[cname, "Pr(>|t|)"], format = "e", digits = 2)) else "Interaction p = NA"
-  # Colors
-  if(is.null(colors)) {
-    colors <- scales::hue_pal()(length(unique(data[[groupvar]])))
-    names(colors) <- unique(data[[groupvar]])
+  # Output summary: robust to missing pairwise
+  meta_rows <- lapply(comparisongroups, function(g) {
+  contrastA <- paste(referencegroup, g, sep = " - ")
+  contrastB <- paste(g, referencegroup, sep = " - ")
+  idx <- which(sum_contrast$contrast %in% c(contrastA, contrastB))
+  if(length(idx)==1 && nrow(refstats)==1 && nrow(compstats[[g]])==1) {
+    # If the contrast is "g - referencegroup", flip sign
+    sign_mult <- if (sum_contrast$contrast[idx] == contrastA) 1 else -1
+    tibble(
+      Outcome = response,
+      Comparison = paste(g, "vs", referencegroup),
+      Slope_Ref = round(refstats$slope, 4),
+      Slope_Comp = round(compstats[[g]]$slope, 4),
+      Slope_Diff = round(sign_mult * sum_contrast$estimate[idx], 4),
+      Slope_SE = round(sum_contrast$SE[idx], 4),
+      Slope_Lower = round(sign_mult * sum_contrast$lower.CL[idx], 4),
+      Slope_Upper = round(sign_mult * sum_contrast$upper.CL[idx], 4),
+      Slope_p = round(sum_contrast$p.value[idx], 5),
+      Cohen_d = round(cohensd[g], 4),
+      Wald_p = round(wald_p, 5),
+      LRT_p = round(lrt_p, 5),
+      LRT_chi = round(lrt_chi, 3),
+      LRT_df = lrt_df,
+      ResidualSD = round(sigma_resid, 3)
+    )
+  } else {
+    tibble(
+      Outcome = response,
+      Comparison = paste(g, "vs", referencegroup),
+      Slope_Ref = NA, Slope_Comp = NA, Slope_Diff = NA,
+      Slope_SE = NA, Slope_Lower = NA, Slope_Upper = NA,
+      Slope_p = NA, Cohen_d = NA, Wald_p = NA,
+      LRT_p = NA, LRT_chi = NA, LRT_df = NA, ResidualSD = NA
+    )
   }
-  ggplot(data, aes_string(x = xvar, y = response, color = groupvar, group = "USUBJID")) +
-    geom_line(alpha = 0.3, size = 0.6) +
-    geom_line(data = pred, aes(x = x, y = predicted, color = group, group = group), size = 1.5, inherit.aes=FALSE) +
-    scale_color_manual(values=colors) +
-    labs(
-      title = paste0(response, ": Group trajectories"),
-      subtitle = pstr, y = response, x = xvar
-    ) +
-    theme_minimal()
+})
+
+  
+  modelsummary <- bind_rows(meta_rows)
+  list(
+    modelsummary = modelsummary,
+    mod_full = mod_full,
+    mod_noint = mod_noint,
+    lrt = lrt,
+    wald_p = wald_p,
+    slopes = sum_emt,
+    contrast = sum_contrast,
+    cohensd = cohensd
+  )
 }
 
-```
-
-```{r}
-library(cowplot)
-
+# --- List of Markers ---
 biavars <- c(
   "MMSE", "SNSB_attention", "SNSB_language", "SNSB_visuospatial", "SNSB_memory", "SNSB_frontal",
   "bmi", "whr", "pbcm", "pbf", "bmr", "ecw_tcw", "tbw_ffm", "PA50_total",
   "ECW_ICW_upper", "ECW_ICW_lower", "Water_Lean_upper", "Water_Lean_lower",
-  "R_upper", "R_lower", "Xc_upper", "Xc_lower",
-  "PA_upper", "PA_lower", "R_H_upper", "R_H_lower", "Xc_H_upper", "Xc_H_lower"
+  "R_upper", "R_lower", "Xc_upper", "Xc_lower", "PA_upper", "PA_lower",
+  "R_H_upper", "R_H_lower", "Xc_H_upper", "Xc_H_lower"
 )
-referencegroup <- "StableCN"
-comparisongroups <- c("CNtransitMCI")
-colors.legend <- c("StableCN"="#00BFC4","CNtransitMCI"="#F8766D")
 
-# --- Your batch analysis ---
-results <- lapply(biavars, function(var) 
-  analyze_longitudinal_trends(
+# --- Batch Analysis ---
+results <- lapply(biavars, function(var) {
+  print(paste("Analyzing:", var))
+  analyze_longitudinal_trends_LRT(
     data = df_long.analysis,
     response = var,
     groupvar = "Change_Type",
     referencegroup = referencegroup,
     comparisongroups = comparisongroups
   )
-)
-modelsummarylist <- lapply(results, function(x)x$modelsummary)
-allsummaries <- dplyr::bind_rows(modelsummarylist, .id = "Biomarker")
-write.csv(allsummaries,"Bioimpedance_LME_summary.csv",row.names = FALSE)
+})
+modelsummarylist <- lapply(results, function(x) x$modelsummary)
+allsummaries <- bind_rows(modelsummarylist, .id = "Biomarker")
+write.csv(allsummaries, "Bioimpedance_LME_LRT_summary.csv", row.names = FALSE)
 
-# --- Trajectory plotting (unchanged) ---
-plot_lmer_model_with_interaction_p <- function(
-  data, response, xvar = "elapsed_years", groupvar = "Change_Type",
-  covariates = c("AGE", "SEX", "EDUYR"), colors = NULL, npoints = 100
-) {
-  formula_str <- paste0(
-    response, " ~ ", xvar, "*", groupvar, " + ",
-    paste(covariates, collapse = " + "), " + (1 + ", xvar, "|USUBJID)"
-  )
-  mod <- lmerTest::lmer(as.formula(formula_str), data = data)
-  pred <- ggeffects::ggpredict(mod, terms = c(paste0(xvar), paste0(groupvar)))
-  coefmat <- coef(summary(mod))
-  cname <- grep(paste0(xvar, ":", groupvar), rownames(coefmat), value=TRUE)
-  raw_pval <- if(length(cname)==1) coefmat[cname, "Pr(>|t|)"] else NA
-  signif_star <- if (!is.na(raw_pval)) {
-    if (raw_pval < 0.001) "***"
-    else if (raw_pval < 0.01) "**"
-    else if (raw_pval < 0.05) "*"
-    else ""
-  } else ""
-  pstr <- if(!is.na(raw_pval)) paste0("Interaction p = ", formatC(raw_pval, digits = 3, format = "f"), " ", signif_star) else "Interaction p = NA"
-  if(is.null(colors)) {
-    colors <- scales::hue_pal()(length(unique(data[[groupvar]])))
-    names(colors) <- unique(data[[groupvar]])
-  }
-  ggplot(data, aes_string(x = xvar, y = response, color = groupvar, group = "USUBJID")) +
-    geom_line(alpha = 0.3, size = 0.6) +
-    geom_line(data = pred, aes(x = x, y = predicted, color = group, group = group), size = 1.5, inherit.aes=FALSE) +
-    scale_color_manual(values=colors) +
-    labs(
-      title = paste0(response, ": Group trajectories"),
-      subtitle = pstr, y = response, x = xvar
-    ) +
-    theme_minimal()
-}
+print("Check complete: Output summary table written!")
 
-output_dir <- "Bioimpedance_Trajectory_Plots"
-dir.create(output_dir, showWarnings = FALSE)
 
-plots <- lapply(biavars, function(var) {
+# --- Batch Plot Generation (Wald + LRT) ---
+output_dir_wald <- "Bioimpedance_Trajectory_WaldPlots"
+output_dir_lrt <- "Bioimpedance_Trajectory_LRTPlots"
+dir.create(output_dir_wald, showWarnings = FALSE)
+dir.create(output_dir_lrt, showWarnings = FALSE)
+plots_wald <- lapply(biavars, function(var)
   plot_lmer_model_with_interaction_p(
     data = df_long.analysis,
     response = var,
     colors = colors.legend
   )
-})
-
+)
+plots_lrt <- lapply(biavars, function(var)
+  plot_lmer_interaction_with_p(
+    data = df_long.analysis,
+    response = var,
+    colors = colors.legend,
+    show.legend = FALSE
+  )
+)
 for (i in seq_along(biavars)) {
-  p <- plots[[i]]
-  if (inherits(p, "ggplot")) {
+  pw <- plots_wald[[i]]
+  pl <- plots_lrt[[i]]
+  if (inherits(pw, "ggplot")) {
     ggsave(
-      filename = file.path(output_dir, paste0(biavars[i], "_trajectory.png")),
-      plot = p,
-      width = 7, height = 5, dpi = 300
+      filename = file.path(output_dir_wald, paste0(biavars[i], "_waldplot.png")),
+      plot = pw, width = 7, height = 5, dpi = 300
+    )
+  }
+  if (inherits(pl, "ggplot")) {
+    ggsave(
+      filename = file.path(output_dir_lrt, paste0(biavars[i], "_lrtplot.png")),
+      plot = pl, width = 7, height = 5, dpi = 300
     )
   }
 }
-
 
 ```
 
 ```{r}
-plot_lmer_interaction_with_p <- function(
-  data, response, xvar = "elapsed_years", groupvar = "Change_Type",
-  covariates = c("AGE", "SEX", "EDUYR"),
-  subjectid = "USUBJID",
-  colors = c("StableCN"="#00BFC4", "CNtransitMCI"="#F8766D"),
-  npoints = 100,
-  show.legend = FALSE
-) {
-  library(lmerTest); library(ggplot2)
-  formula_full <- paste0(response, " ~ ", xvar, "*", groupvar, " + ",
-                         paste(covariates, collapse = " + "), " + (1 + ", xvar, "|", subjectid, ")")
-  formula_noint <- paste0(response, " ~ ", xvar, " + ", groupvar, " + ",
-                         paste(covariates, collapse = " + "), " + (1 + ", xvar, "|", subjectid, ")")
-  mod_full <- lmerTest::lmer(as.formula(formula_full), data = data, REML=FALSE)
-  mod_noint <- lmerTest::lmer(as.formula(formula_noint), data = data, REML=FALSE)
-  lrt <- anova(mod_noint, mod_full)
-  # Likelihood ratio omnibus p
-  omnibus_p <- lrt$`Pr(>Chisq)`[2]
-  chisq_val <- lrt$Chisq[2]
-  df_val <- lrt$Df[2]
-  sigstars <- function(p) if(p < 0.001) "***" else if(p < 0.01) "**" else if(p < 0.05) "*" else ""
-  omnibus_label <- sprintf("Interaction: Chi^2 = %.2f, df = %d, p = %.3g %s", chisq_val, df_val, omnibus_p, sigstars(omnibus_p))
+library(performance)
 
-  # Individual interaction p
-  coefsum <- summary(mod_full)$coefficients
-  int_rows <- grep(paste0(xvar, ":", groupvar), rownames(coefsum), value=TRUE)
-  int_annot <- ""
-  if(length(int_rows) > 0) {
-    vals <- sapply(int_rows, function(n) {
-      pval <- coefsum[n, "Pr(>|t|)"]
-      nm <- gsub(paste0(xvar, ":", groupvar), "", n)
-      nm <- gsub(groupvar, "", nm)
-      paste0("p_", nm, " = ", formatC(pval, digits=3, format='f'), sigstars(pval))
-    })
-    int_annot <- paste(vals, collapse=" | ")
-  }
+if (!dir.exists("Diagnostics")) dir.create("Diagnostics")
 
-  # Prediction grid
-  xseq <- seq(min(data[[xvar]], na.rm=TRUE), max(data[[xvar]], na.rm=TRUE), length.out = npoints)
-  grid <- expand.grid(
-    elapsed_years = xseq,
-    Change_Type = levels(factor(data[[groupvar]]))
-  )
-  for(cov in covariates) {
-    if(is.numeric(data[[cov]])) grid[[cov]] <- median(data[[cov]], na.rm=TRUE)
-    else grid[[cov]] <- levels(factor(data[[cov]]))[1]
-  }
-  pred <- predict(mod_full, newdata = grid, re.form=NA)
-  grid$predicted <- pred
-
-  p <- ggplot() +
-    geom_line(data = data, aes_string(x = xvar, y = response, color = groupvar, group = subjectid), alpha = 0.25, size = 0.6) +
-    geom_line(data = grid, aes_string(x = "elapsed_years", y = "predicted", color = "Change_Type", group = "Change_Type"), size = 2) +
-    scale_color_manual(values=colors) +
-    labs(
-      title = paste0(response, ": Group trajectories"),
-      subtitle = paste(omnibus_label, int_annot, sep = "\n"),
-      y = response, x = xvar
-    ) +
-    theme_minimal()
-  if (!show.legend) p <- p + theme(legend.position="none")
-  return(p)
+safe_var_extract <- function(vardf, grpval, var1val, var2val) {
+  idx <- which(vardf$grp==grpval & vardf$var1==var1val & vardf$var2==var2val)
+  if(length(idx)==1 && !is.na(vardf$vcov[idx])) vardf$vcov[idx] else NA_real_
 }
 
-biavars_2 <- c(
-  "MMSE", "SNSB_attention", "SNSB_language", "SNSB_visuospatial", "SNSB_memory", "SNSB_frontal","bmi", "whr", "pbcm", "pbf", "bmr", "ecw_tcw", "tbw_ffm", "PA50_total",
-  "ECW_ICW_upper", "ECW_ICW_lower", "Water_Lean_upper", "Water_Lean_lower",
-  "R_upper", "R_lower", "Xc_upper", "Xc_lower", "PA_upper", "PA_lower",
-  "R_H_upper", "R_H_lower", "Xc_H_upper", "Xc_H_lower"
-)
-colors.legend_2 <- c("StableCN"="#00BFC4","CNtransitMCI"="#F8766D")
-
-plots_interaction_2 <- lapply(biavars_2, function(var)
-  plot_lmer_interaction_with_p(
-    data = df_long.analysis,
-    response = var,
-    colors = colors.legend_2,
-    show.legend = FALSE
+safe_r2 <- function(model) {
+  out <- tryCatch(
+    suppressWarnings(performance::r2(model)),
+    error = function(e) list(R2_marginal=NA_real_, R2_conditional=NA_real_)
   )
-)
-
-cowplot::plot_grid(plotlist = plots_interaction_2[1:6], ncol = 2)
-
-# Export all interaction plots (no filename collision)
-output_dir_2 <- "Bioimpedance_Trajectory_InteractionPlots"
-if (!dir.exists(output_dir_2)) dir.create(output_dir_2)
-for (i in seq_along(biavars_2)) {
-  var <- biavars_2[i]
-  p <- plots_interaction_2[[i]]
-  if (!is.null(p)) {
-    ggsave(
-      filename = file.path(output_dir_2, paste0(var, "_interactionplot.png")),
-      plot = p,
-      width = 7, height = 5, dpi = 300
-    )
-  }
+  list(marginal=out$R2_marginal, conditional=out$R2_conditional)
 }
+
+diagnostics_list <- lapply(seq_along(biavars), function(i) {
+  var <- biavars[i]
+  m <- results[[i]]$mod_full
+
+  png(filename = sprintf("Diagnostics/%s_QQplot.png", var), width = 700, height = 700)
+  qqnorm(residuals(m)); qqline(residuals(m)); dev.off()
+
+  png(filename = sprintf("Diagnostics/%s_ResVsFitted.png", var), width = 700, height = 700)
+  plot(fitted(m), residuals(m), main = paste(var, "Fitted vs Residuals"),
+       xlab = "Fitted Values", ylab = "Residuals"); abline(h = 0, lty = 2); dev.off()
+
+  aic <- tryCatch(AIC(m), error=function(e) NA_real_)
+  bic <- tryCatch(BIC(m), error=function(e) NA_real_)
+  r2 <- safe_r2(m)
+  ranef_var <- tryCatch(as.data.frame(VarCorr(m)), error=function(e) data.frame())
+  rand_intercept <- if(nrow(ranef_var)>0) safe_var_extract(ranef_var,"USUBJID","","") else NA_real_
+  rand_slope <- if(nrow(ranef_var)>0) safe_var_extract(ranef_var,"USUBJID","elapsed_years","") else NA_real_
+  conv_warn <- if (!is.null(m@optinfo$conv$lme4$messages)) paste(m@optinfo$conv$lme4$messages, collapse="; ") else NA
+  singular_flag <- if (isSingular(m, tol=1e-4)) "singular" else NA
+
+  data.frame(Biomarker = var,
+             AIC = aic, BIC = bic,
+             Marginal_R2 = r2$marginal,
+             Conditional_R2 = r2$conditional,
+             RandomInterceptVar = rand_intercept,
+             RandomSlopeVar = rand_slope,
+             ConvergenceWarning = conv_warn,
+             SingularFit = singular_flag)
+})
+diagnostics_df <- do.call(rbind, diagnostics_list)
+write.csv(diagnostics_df, "Diagnostics/Bioimpedance_LME_diagnostics.csv", row.names = FALSE)
+
 
 ```
