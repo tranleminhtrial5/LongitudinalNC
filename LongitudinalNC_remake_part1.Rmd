@@ -114,13 +114,18 @@ print(participant_group_summary)
 ```
 
 ```{r}
+# ---- Libraries ----
 library(dplyr)
+library(tableone)
+library(effsize)
 library(emmeans)
 library(tibble)
+library(DescTools) # for Cramér's V and CI
 
 output_dir <- "Baseline_Results"
 if (!dir.exists(output_dir)) dir.create(output_dir)
 
+### --- Data Preparation: get baseline per subject ---
 df_baseline <- df4 %>%
   filter(Change_Type %in% c("StableCN", "CNtransitMCI")) %>%
   group_by(USUBJID) %>%
@@ -128,77 +133,136 @@ df_baseline <- df4 %>%
   ungroup()
 
 df_baseline$SEX <- as.factor(df_baseline$SEX)
-df_baseline$Change_Type <- factor(df_baseline$Change_Type, levels = c("StableCN", "CNtransitMCI")) # đảm bảo thứ tự nhóm
+df_baseline$Change_Type <- factor(df_baseline$Change_Type, levels = c("StableCN", "CNtransitMCI"))
 
-vars_table2 <- c('height','weight','Waistcir','Hipcir','sysbp','diabp','bmi','ac','whr',
-                 'pbcm','pbf','bmr','tbw_ffm','ecw_tcw','PA50_total')
-vars_table3 <- c('ECW_ICW_upper','ECW_ICW_lower','Water_Lean_upper','Water_Lean_lower',
-                 'R_upper','R_lower','Xc_upper','Xc_lower','PA_upper','PA_lower',
-                 'R_H_upper','R_H_lower','Xc_H_upper','Xc_H_lower')
 group_var <- "Change_Type"
-covars <- c("AGE", "SEX", "EDUYR")
 
-units_table2 <- c(height="cm", weight="kg", Waistcir="cm", Hipcir="cm",
-                  sysbp="mmHg", diabp="mmHg", bmi="kg/m2", ac="", whr="", pbcm="%", pbf="%", bmr="kcal",
-                  tbw_ffm="%", ecw_tcw="%", PA50_total="degree")
-units_table3 <- c(
-  ECW_ICW_upper="%", ECW_ICW_lower="%", Water_Lean_upper="%", Water_Lean_lower="%",
-  R_upper="Ohm", R_lower="Ohm", Xc_upper="Ohm", Xc_lower="Ohm",
-  PA_upper="degree", PA_lower="degree",
-  R_H_upper="Ohm", R_H_lower="Ohm", Xc_H_upper="Ohm", Xc_H_lower="Ohm"
-)
+# ---- Table 1: Demographics & Cognition ----
+vars_table1 <- c('SEX','AGE','EDUYR','gds','kdsq','visit_count','MMSE',
+                 'SNSB_attention','SNSB_language','SNSB_visuospatial',
+                 'SNSB_memory','SNSB_frontal')
 
-get_sample_size <- function(df, v, lvl) {
-  # Đếm số mẫu không missing cho từng nhóm
-  sum(!is.na(df[[v]]) & df[[group_var]] == lvl)
+tab1 <- CreateTableOne(vars = vars_table1, strata = group_var, data = df_baseline, test = FALSE)
+
+get_missing_pct <- function(x, g) {
+  res <- tapply(is.na(x), g, mean)
+  res[is.na(res)] <- 0
+  res * 100
 }
 
-get_ancova_table <- function(varlist, groupvar, covars, df, units=NULL) {
-  allout <- lapply(varlist, function(v) {
-    fml <- as.formula(paste(v, "~", groupvar, "+", paste(covars, collapse=" + ")))
-    model <- lm(fml, data=df, na.action=na.exclude)
+table1stats <- lapply(vars_table1, function(v) {
+  x <- df_baseline[[v]]
+  g <- df_baseline[[group_var]]
+  miss_pct <- get_missing_pct(x, g)
+  if (length(unique(g)) != 2) return(data.frame(
+    Variable = v, Type = NA, Pvalue = NA, SMD = NA, SMD_L = NA, SMD_U = NA, EffectSize = NA,
+    Miss_StableCN = NA, Miss_CNtransitMCI = NA))
+  
+  if (is.factor(x) | is.character(x)) {
+    tbl <- table(x, g)
+    use_fisher <- any(tbl < 5)
+    pval <- if (use_fisher) fisher.test(tbl)$p.value else chisq.test(tbl)$p.value
+    # Cramér's V or Cohen's h for binary
+    es <- tryCatch({
+      if (nlevels(as.factor(x))==2) {
+        counts <- table(x, g)
+        p1 <- prop.table(counts,2)[1,1]
+        p2 <- prop.table(counts,2)[1,2]
+        2*abs(asin(sqrt(p1))-asin(sqrt(p2)))
+      } else {
+        DescTools::CramerV(tbl, ci = FALSE)
+      }
+    }, error=function(e) NA)
+    return(data.frame(
+      Variable = v, Type = "cat", Pvalue = pval, SMD = NA, SMD_L = NA, SMD_U = NA, EffectSize = round(es, 3),
+      Miss_StableCN = round(miss_pct["StableCN"], 2), Miss_CNtransitMCI = round(miss_pct["CNtransitMCI"],2)
+    ))
+  }
+  
+  # For numeric variables, Cohen's d (with 95% CI)
+  is_norm <- tryCatch((shapiro.test(na.omit(x))$p.value > 0.05), error=function(e) FALSE)
+  test_result <- if (is_norm) t.test(x ~ g) else wilcox.test(x ~ g)
+  cd <- effsize::cohen.d(x, g, hedges.correction = TRUE, conf.level = 0.95)
+  return(data.frame(
+    Variable = v, Type = "num", Pvalue = test_result$p.value, SMD = cd$estimate, SMD_L = cd$conf.int[1], SMD_U = cd$conf.int[2], EffectSize = cd$estimate,
+    Miss_StableCN = round(miss_pct["StableCN"],2), Miss_CNtransitMCI = round(miss_pct["CNtransitMCI"],2)))
+})
+df_table1stats <- bind_rows(table1stats)
+
+# Export Table 1
+write.csv(print(tab1, quote = TRUE, noSpaces = TRUE), file.path(output_dir,"table1_baseline.csv"))
+write.csv(df_table1stats, file.path(output_dir, "table1_baseline_stats_full.csv"), row.names = FALSE)
+cat("Table 1 exported as .csv files in", output_dir, "\n")
+
+# ---- Table 2: Anthropometry & Body Composition (Adjusted) ----
+vars_table2 <- c('height','weight','Waistcir','Hipcir','bmi','ac','whr',
+                 'pbcm','pbf','bmr','tbw_ffm','ecw_tcw','PA50_total')
+covars <- c("AGE", "SEX", "EDUYR")
+units_table2 <- c(height = "cm", weight = "kg", Waistcir = "cm", Hipcir = "cm", sysbp = "mmHg", diabp = "mmHg",
+                  bmi = "kg/m2", ac = "", whr = "", pbcm = "%", pbf = "%", bmr = "kcal", tbw_ffm = "%", ecw_tcw = "%", PA50_total = "degree")
+
+get_sample_size <- function(df, v, lvl) sum(!is.na(df[[v]]) & df[[group_var]] == lvl)
+get_missing_pct_tbl <- function(df, v, lvl) mean(is.na(df[[v]]) & df[[group_var]] == lvl) * 100
+
+get_ancova_table <- function(varlist, groupvar, covars, df, units = NULL) {
+  lapply(varlist, function(v) {
+    fml <- as.formula(paste(v, "~", groupvar, "+", paste(covars, collapse = " + ")))
+    model <- lm(fml, data = df, na.action = na.exclude)
     emm <- emmeans(model, groupvar)
-    summary_emm <- summary(emm, level=0.95)
-    contrasts <- summary(contrast(emm, method="pairwise"), infer=TRUE)
-    aovm <- tryCatch(anova(model), error=function(e) NULL)
+    summary_emm <- summary(emm, level = 0.95)
+    contrasts <- summary(contrast(emm, method = "pairwise"), infer = TRUE)
+    aovm <- tryCatch(anova(model), error = function(e) NULL)
     eta2 <- tryCatch({
       ss_group <- aovm[groupvar, "Sum Sq"]
       ss_total <- sum(aovm[,"Sum Sq"])
       ss_group/ss_total
     }, error = function(e) NA)
-    adj_r2 <- tryCatch(summary(model)$adj.r.squared, error=function(e) NA)
-    # Tên nhóm (đảm bảo đúng thứ tự: StableCN, CNtransitMCI)
-    g1 <- levels(df[[groupvar]])[1]
-    g2 <- levels(df[[groupvar]])[2]
+    adj_r2 <- tryCatch(summary(model)$adj.r.squared, error = function(e) NA)
+    g1 <- levels(df[[group_var]])[1]
+    g2 <- levels(df[[group_var]])[2]
     n1 <- get_sample_size(df, v, g1)
     n2 <- get_sample_size(df, v, g2)
+    miss1 <- get_missing_pct_tbl(df, v, g1)
+    miss2 <- get_missing_pct_tbl(df, v, g2)
     tibble(
       Variable = v,
       Unit = if (!is.null(units) && !is.na(units[v])) units[v] else "",
       N_StableCN = n1,
       N_CNtransitMCI = n2,
-      StableCN_AdjMean_CI = sprintf("%.2f (%.2f, %.2f)", summary_emm$emmean[which(summary_emm[[groupvar]] == g1)],
-                                    summary_emm$lower.CL[which(summary_emm[[groupvar]] == g1)],
-                                    summary_emm$upper.CL[which(summary_emm[[groupvar]] == g1)]),
-      CNtransitMCI_AdjMean_CI = sprintf("%.2f (%.2f, %.2f)", summary_emm$emmean[which(summary_emm[[groupvar]] == g2)],
-                                    summary_emm$lower.CL[which(summary_emm[[groupvar]] == g2)],
-                                    summary_emm$upper.CL[which(summary_emm[[groupvar]] == g2)]),
+      StableCN_AdjMean_CI = sprintf("%.2f (%.2f, %.2f)", summary_emm$emmean[summary_emm[[groupvar]] == g1],
+                                    summary_emm$lower.CL[summary_emm[[groupvar]] == g1],
+                                    summary_emm$upper.CL[summary_emm[[groupvar]] == g1]),
+      CNtransitMCI_AdjMean_CI = sprintf("%.2f (%.2f, %.2f)", summary_emm$emmean[summary_emm[[groupvar]] == g2],
+                                        summary_emm$lower.CL[summary_emm[[groupvar]] == g2],
+                                        summary_emm$upper.CL[summary_emm[[groupvar]] == g2]),
       Diff_CI = sprintf("%.2f (%.2f, %.2f)", contrasts$estimate[1], contrasts$lower.CL[1], contrasts$upper.CL[1]),
       SE = round(contrasts$SE[1],2),
       PValue = round(contrasts$p.value[1],4),
       EtaSq = round(eta2,3),
-      Adj_R2 = round(adj_r2,3)
+      Adj_R2 = round(adj_r2,3),
+      Miss_StableCN = round(miss1,2),
+      Miss_CNtransitMCI = round(miss2,2)
     )
-  })
-  do.call(rbind, allout)
+  }) %>% bind_rows()
 }
 
-# --- Generate and export tables ---
 tbl2_journal <- get_ancova_table(vars_table2, group_var, covars, df_baseline, units_table2)
+write.csv(tbl2_journal, file.path(output_dir, "table2_journalformat_full.csv"), row.names = FALSE)
+cat("Table 2 exported as .csv file in", output_dir, "\n")
+
+# ---- Table 3: Segmental Variables (Adjusted) ----
+vars_table3 <- c('ECW_ICW_upper','ECW_ICW_lower','Water_Lean_upper','Water_Lean_lower',
+                 'R_upper','R_lower','Xc_upper','Xc_lower','PA_upper','PA_lower',
+                 'R_H_upper','R_H_lower','Xc_H_upper','Xc_H_lower')
+units_table3 <- c(
+  ECW_ICW_upper = "%", ECW_ICW_lower = "%", Water_Lean_upper = "%", Water_Lean_lower = "%",
+  R_upper = "Ohm", R_lower = "Ohm", Xc_upper = "Ohm", Xc_lower = "Ohm",
+  PA_upper = "degree", PA_lower = "degree", R_H_upper = "Ohm", R_H_lower = "Ohm",
+  Xc_H_upper = "Ohm", Xc_H_lower = "Ohm"
+)
 tbl3_journal <- get_ancova_table(vars_table3, group_var, covars, df_baseline, units_table3)
-write.csv(tbl2_journal, file.path(output_dir, "table2_journalformat.csv"), row.names=FALSE)
-write.csv(tbl3_journal, file.path(output_dir, "table3_journalformat.csv"), row.names=FALSE)
-cat("Table 2 & 3 đã xuất ra .csv format journal ở folder:", output_dir, "\n")
+write.csv(tbl3_journal, file.path(output_dir, "table3_journalformat_full.csv"), row.names = FALSE)
+cat("Table 3 exported as .csv file in", output_dir, "\n")
 
 
 ```
