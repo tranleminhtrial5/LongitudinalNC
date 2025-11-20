@@ -114,21 +114,22 @@ print(participant_group_summary)
 ```
 
 ```{r}
-df_baseline <- df4 %>%
-  filter(Change_Type %in% c("StableCN", "CNtransitMCI"))
+library(dplyr)
+library(emmeans)
+library(tibble)
 
-df_baseline <- df_baseline %>%
+output_dir <- "Baseline_Results"
+if (!dir.exists(output_dir)) dir.create(output_dir)
+
+df_baseline <- df4 %>%
+  filter(Change_Type %in% c("StableCN", "CNtransitMCI")) %>%
   group_by(USUBJID) %>%
   filter(datetest == min(datetest)) %>%
   ungroup()
 
-#write.csv(df_baseline, "df_baseline.csv",row.names = FALSE)
-
 df_baseline$SEX <- as.factor(df_baseline$SEX)
-df_baseline$Change_Type <- as.factor(df_baseline$Change_Type)
+df_baseline$Change_Type <- factor(df_baseline$Change_Type, levels = c("StableCN", "CNtransitMCI")) # đảm bảo thứ tự nhóm
 
-vars_table1 <- c('SEX','AGE','EDUYR','gds','kdsq','visitcount','MMSE',
-                 'SNSB_attention','SNSB_language','SNSB_visuospatial','SNSB_memory','SNSB_frontal')
 vars_table2 <- c('height','weight','Waistcir','Hipcir','sysbp','diabp','bmi','ac','whr',
                  'pbcm','pbf','bmr','tbw_ffm','ecw_tcw','PA50_total')
 vars_table3 <- c('ECW_ICW_upper','ECW_ICW_lower','Water_Lean_upper','Water_Lean_lower',
@@ -137,106 +138,68 @@ vars_table3 <- c('ECW_ICW_upper','ECW_ICW_lower','Water_Lean_upper','Water_Lean_
 group_var <- "Change_Type"
 covars <- c("AGE", "SEX", "EDUYR")
 
-tab1 <- CreateTableOne(vars=vars_table1, strata=group_var, data=df_baseline)
-print(tab1, showAllLevels=TRUE, quote=TRUE, noSpaces=TRUE)
-
-get_pvals_es <- function(varlist, groupvar, df){
-  res <- lapply(varlist, function(v){
-    vals <- df[[v]]; g <- df[[groupvar]]
-    non_missing <- !(is.na(vals) | is.na(g))
-    vals_nm <- vals[non_missing]
-    g_nm <- g[non_missing]
-    pval <- NA; effsize <- NA
-    if (length(unique(g_nm)) != 2) return(list(pval=NA,effsize=NA))
-    if (is.numeric(vals_nm) | is.integer(vals_nm)){
-      p_norm <- tryCatch(shapiro.test(vals_nm)$p.value,error=function(e) NA)
-      if (!is.na(p_norm) && p_norm > 0.05){
-        ttest <- t.test(vals_nm ~ g_nm)
-        pval <- ttest$p.value
-        effsize <- effsize::cohen.d(vals_nm, g_nm)$estimate
-      }else{
-        wilcox <- wilcox.test(vals_nm ~ g_nm)
-        pval <- wilcox$p.value
-        effsize <- effsize::cohen.d(vals_nm, g_nm, hedges.correction=TRUE)$estimate
-      }
-    }else{
-      tbl <- table(vals_nm, g_nm)
-      pval <- if(any(tbl < 5)) fisher.test(tbl)$p.value else chisq.test(tbl)$p.value
-      effsize <- NA
-    }
-    return(list(pval=pval,effsize=effsize))
-  })
-  names(res) <- varlist
-  return(res)
-}
-result_table1 <- get_pvals_es(vars_table1, group_var, df_baseline)
-print(result_table1)
-
-get_group_coef <- function(res, group_var, df) {
-  levs <- levels(df[[group_var]])
-  target_lev <- levs[2]
-  target_name <- grep(target_lev, rownames(coef(res)), value=TRUE)
-  if(length(target_name) == 1) {
-    pval <- coef(res)[target_name, "Pr(>|t|)"]
-    est <- coef(res)[target_name, "Estimate"]
-  } else {
-    pval <- NA
-    est <- NA
-  }
-  return(list(pval=pval, estimate=est))
-}
-
-ancova_tab2 <- lapply(vars_table2, function(v){
-  formula <- as.formula(paste(v, "~", group_var, "+ AGE + SEX + EDUYR"))
-  model <- lm(formula, data=df_baseline, na.action=na.exclude)
-  res <- summary(model)
-  grp <- get_group_coef(res, group_var, df_baseline)
-  return(list(pval=grp$pval, estimate=grp$estimate, model=res))
-})
-names(ancova_tab2) <- vars_table2
-
-ancova_tab3 <- lapply(vars_table3, function(v){
-  formula <- as.formula(paste(v, "~", group_var, "+ AGE + SEX + EDUYR"))
-  model <- lm(formula, data=df_baseline, na.action=na.exclude)
-  res <- summary(model)
-  grp <- get_group_coef(res, group_var, df_baseline)
-  return(list(pval=grp$pval, estimate=grp$estimate, model=res))
-})
-names(ancova_tab3) <- vars_table3
-
-print_ancova <- function(res_list, units = NULL) {
-  for (v in names(res_list)) {
-    est <- res_list[[v]]$estimate
-    pval <- res_list[[v]]$pval
-    u <- if(!is.null(units) && !is.na(units[v])) units[v] else ""
-    cat(sprintf("%-25s Estimate: %8.3f %-5s | p-value: %.4f\n", v, est, u, pval))
-  }
-}
-
-units_table2 <- c(height = "cm", weight = "kg", BMI = "", whr = "", pbcm = "%", pbf = "%", bmr = "kcal", ecw_tcw = "%", tbw_ffm = "%", PA50_total = "degree")
+units_table2 <- c(height="cm", weight="kg", Waistcir="cm", Hipcir="cm",
+                  sysbp="mmHg", diabp="mmHg", bmi="kg/m2", ac="", whr="", pbcm="%", pbf="%", bmr="kcal",
+                  tbw_ffm="%", ecw_tcw="%", PA50_total="degree")
 units_table3 <- c(
-  ECW_ICW_upper = "%", ECW_ICW_lower = "%", Water_Lean_upper = "%", Water_Lean_lower = "%",
-  R_upper = "Ω", R_lower = "Ω", Xc_upper = "Ω", Xc_lower = "Ω", PA_upper = "degree", PA_lower = "degree",
-  R_H_upper = "Ω", R_H_lower = "Ω", Xc_H_upper = "Ω", Xc_H_lower = "Ω"
+  ECW_ICW_upper="%", ECW_ICW_lower="%", Water_Lean_upper="%", Water_Lean_lower="%",
+  R_upper="Ohm", R_lower="Ohm", Xc_upper="Ohm", Xc_lower="Ohm",
+  PA_upper="degree", PA_lower="degree",
+  R_H_upper="Ohm", R_H_lower="Ohm", Xc_H_upper="Ohm", Xc_H_lower="Ohm"
 )
 
-cat("\n===== Table 2: ANCOVA Results =====\n")
-print_ancova(ancova_tab2, units_table2)
+get_sample_size <- function(df, v, lvl) {
+  # Đếm số mẫu không missing cho từng nhóm
+  sum(!is.na(df[[v]]) & df[[group_var]] == lvl)
+}
 
-cat("\n===== Table 3: ANCOVA Results =====\n")
-print_ancova(ancova_tab3, units_table3)
+get_ancova_table <- function(varlist, groupvar, covars, df, units=NULL) {
+  allout <- lapply(varlist, function(v) {
+    fml <- as.formula(paste(v, "~", groupvar, "+", paste(covars, collapse=" + ")))
+    model <- lm(fml, data=df, na.action=na.exclude)
+    emm <- emmeans(model, groupvar)
+    summary_emm <- summary(emm, level=0.95)
+    contrasts <- summary(contrast(emm, method="pairwise"), infer=TRUE)
+    aovm <- tryCatch(anova(model), error=function(e) NULL)
+    eta2 <- tryCatch({
+      ss_group <- aovm[groupvar, "Sum Sq"]
+      ss_total <- sum(aovm[,"Sum Sq"])
+      ss_group/ss_total
+    }, error = function(e) NA)
+    adj_r2 <- tryCatch(summary(model)$adj.r.squared, error=function(e) NA)
+    # Tên nhóm (đảm bảo đúng thứ tự: StableCN, CNtransitMCI)
+    g1 <- levels(df[[groupvar]])[1]
+    g2 <- levels(df[[groupvar]])[2]
+    n1 <- get_sample_size(df, v, g1)
+    n2 <- get_sample_size(df, v, g2)
+    tibble(
+      Variable = v,
+      Unit = if (!is.null(units) && !is.na(units[v])) units[v] else "",
+      N_StableCN = n1,
+      N_CNtransitMCI = n2,
+      StableCN_AdjMean_CI = sprintf("%.2f (%.2f, %.2f)", summary_emm$emmean[which(summary_emm[[groupvar]] == g1)],
+                                    summary_emm$lower.CL[which(summary_emm[[groupvar]] == g1)],
+                                    summary_emm$upper.CL[which(summary_emm[[groupvar]] == g1)]),
+      CNtransitMCI_AdjMean_CI = sprintf("%.2f (%.2f, %.2f)", summary_emm$emmean[which(summary_emm[[groupvar]] == g2)],
+                                    summary_emm$lower.CL[which(summary_emm[[groupvar]] == g2)],
+                                    summary_emm$upper.CL[which(summary_emm[[groupvar]] == g2)]),
+      Diff_CI = sprintf("%.2f (%.2f, %.2f)", contrasts$estimate[1], contrasts$lower.CL[1], contrasts$upper.CL[1]),
+      SE = round(contrasts$SE[1],2),
+      PValue = round(contrasts$p.value[1],4),
+      EtaSq = round(eta2,3),
+      Adj_R2 = round(adj_r2,3)
+    )
+  })
+  do.call(rbind, allout)
+}
 
-ggplot(df_baseline, aes(x=Change_Type, y=R_lower, fill=Change_Type)) +
-  geom_violin(trim=FALSE) +
-  geom_boxplot(width=0.1, fill="white") +
-  labs(title="R_lower by Group", y="R_lower") +
-  theme_minimal()
+# --- Generate and export tables ---
+tbl2_journal <- get_ancova_table(vars_table2, group_var, covars, df_baseline, units_table2)
+tbl3_journal <- get_ancova_table(vars_table3, group_var, covars, df_baseline, units_table3)
+write.csv(tbl2_journal, file.path(output_dir, "table2_journalformat.csv"), row.names=FALSE)
+write.csv(tbl3_journal, file.path(output_dir, "table3_journalformat.csv"), row.names=FALSE)
+cat("Table 2 & 3 đã xuất ra .csv format journal ở folder:", output_dir, "\n")
 
-#write.csv(print(tab1, quote = TRUE, noSpaces = TRUE), "table1_baseline.csv")
-tbl2_results <- sapply(names(ancova_tab2), function(var) c(Estimate = ancova_tab2[[var]]$estimate, Pvalue = ancova_tab2[[var]]$pval))
-#write.csv(tbl2_results, "table2_ancova.csv")
-tbl3_results <- sapply(names(ancova_tab3), function(var) c(Estimate = ancova_tab3[[var]]$estimate, Pvalue = ancova_tab3[[var]]$pval))
-#write.csv(tbl3_results, "table3_ancova.csv")
 
 ```
 
