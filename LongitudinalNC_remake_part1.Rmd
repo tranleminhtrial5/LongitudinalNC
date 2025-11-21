@@ -296,6 +296,259 @@ print(spaghetti_plots[[1]])
 #}
 ```
 ```{r}
+# Trial
+# --- Libraries ---
+library(lmerTest)
+library(emmeans)
+library(dplyr)
+library(tibble)
+library(ggeffects)
+library(forcats)
+library(ggplot2)  # For plot annotation
+
+# --- Group Colors ---
+colors.legend <- c(
+  "StableCN" = "#1f77b4",      # Blue (Stable/Control)
+  "CNtransitMCI" = "#ff7f0e"   # Orange (Transition group)
+)
+
+# --- Data Prep ---
+df_long.analysis$Change_Type <- as.factor(df_long.analysis$Change_Type)
+df_long.analysis$Change_Type <- fct_recode(
+  df_long.analysis$Change_Type,
+  StableCN = "StableCN", 
+  CNtransitMCI = "CNtransitMCI"
+)
+print(levels(df_long.analysis$Change_Type)) 
+print(table(df_long.analysis$Change_Type, useNA = "always"))
+
+referencegroup <- "StableCN"
+comparisongroups <- c("CNtransitMCI")
+
+# --- Core Analysis Function: LME + LRT + Wald ---
+analyze_longitudinal_trends_LRT <- function(
+  data, response, xvar = "elapsed_years", groupvar = "Change_Type",
+  covariates = c("AGE", "SEX", "EDUYR"), subjectid = "USUBJID",
+  referencegroup, comparisongroups
+) {
+  # Validate group levels first
+  levels_grp <- levels(as.factor(data[[groupvar]]))
+  if (!referencegroup %in% levels_grp) stop(paste("Reference group", referencegroup, "not found in levels"))
+  if (any(!comparisongroups %in% levels_grp)) stop(paste("Comparison group(s)", paste(comparisongroups[!comparisongroups %in% levels_grp], collapse=", "), "not found in levels"))
+
+  # Set reference level for modeling
+  data[[groupvar]] <- as.factor(data[[groupvar]])
+  data[[groupvar]] <- relevel(data[[groupvar]], ref = referencegroup)
+  
+  # Model formulas
+  formula_full <- as.formula(
+    paste0(response, " ~ ", xvar, "*", groupvar, " + ", paste(covariates, collapse = " + "), 
+           " + (1 + ", xvar, "|", subjectid, ")")
+  )
+  formula_noint <- as.formula(
+    paste0(response, " ~ ", xvar, " + ", groupvar, " + ", paste(covariates, collapse = " + "), 
+           " + (1 + ", xvar, "|", subjectid, ")")
+  )
+  
+  # Check for all NA or missing column
+  if (!response %in% names(data) || all(is.na(data[[response]]))) {
+    warning(paste("Skipping", response, "because data is missing or all NA"))
+    return(list(modelsummary = tibble(Outcome = response, Comparison = paste(comparisongroups, "vs", referencegroup),
+                                         Slope_Ref = NA, Slope_Comp = NA, Slope_Diff = NA,
+                                         Slope_SE = NA, Slope_Lower = NA, Slope_Upper = NA,
+                                         Slope_p = NA, Cohen_d = NA, Wald_p = NA,
+                                         LRT_p = NA, LRT_chi = NA, LRT_df = NA, ResidualSD = NA)))
+  }
+  
+  # Fit models
+  mod_full <- tryCatch(lmerTest::lmer(formula_full, data = data, REML=FALSE), error = function(e) NA)
+  mod_noint <- tryCatch(lmerTest::lmer(formula_noint, data = data, REML=FALSE), error = function(e) NA)
+  if (any(is.na(c(mod_full, mod_noint)))) {
+    warning(paste("Model fit failed for", response))
+    return(list(modelsummary = tibble(Outcome = response, Comparison = paste(comparisongroups, "vs", referencegroup),
+                                         Slope_Ref = NA, Slope_Comp = NA, Slope_Diff = NA,
+                                         Slope_SE = NA, Slope_Lower = NA, Slope_Upper = NA,
+                                         Slope_p = NA, Cohen_d = NA, Wald_p = NA,
+                                         LRT_p = NA, LRT_chi = NA, LRT_df = NA, ResidualSD = NA)))
+  }
+  
+  # LRT p-value
+  lrt <- anova(mod_noint, mod_full)
+  lrt_p <- lrt$`Pr(>Chisq)`[2]
+  lrt_chi <- lrt$Chisq[2]
+  lrt_df <- lrt$Df[2]
+  
+  # Wald p-value
+  coefmat <- coef(summary(mod_full))
+  interaction_row <- grep(paste0(xvar, ":", groupvar), rownames(coefmat), value = TRUE)
+  wald_p <- if(length(interaction_row) > 0) coefmat[interaction_row, "Pr(>|t|)"] else NA_real_
+  
+  # Slope extraction
+  emt <- emmeans::emtrends(mod_full, specs = groupvar, var = xvar)
+  sum_emt <- summary(emt, infer = TRUE)
+  slope_tests <- sum_emt %>% dplyr::rename(slope = !!paste0(xvar, ".trend"), group = !!groupvar)
+  refstats <- slope_tests %>% filter(group == referencegroup)
+  compstats <- lapply(comparisongroups, function(g) slope_tests %>% filter(group == g))
+  names(compstats) <- comparisongroups
+  
+  # Slope difference & 95% CI
+  contrast_out <- emmeans::contrast(emt, method = "revpairwise")
+  sum_contrast <- summary(contrast_out, infer = TRUE)
+
+  # Effect size
+  sigma_resid <- suppressWarnings(sigma(mod_full))
+  cohensd <- sapply(comparisongroups, function(g) {
+    comp <- compstats[[g]]$slope
+    ref <- refstats$slope
+    if (length(comp)==0 || length(ref)==0 || is.na(sigma_resid)) {
+      NA
+    } else {
+      abs((comp - ref)/sigma_resid)
+    }
+  })
+  
+  # Output summary: robust to missing pairwise
+  meta_rows <- lapply(comparisongroups, function(g) {
+  contrastA <- paste(referencegroup, g, sep = " - ")
+  contrastB <- paste(g, referencegroup, sep = " - ")
+  idx <- which(sum_contrast$contrast %in% c(contrastA, contrastB))
+  if(length(idx)==1 && nrow(refstats)==1 && nrow(compstats[[g]])==1) {
+    # If the contrast is "g - referencegroup", flip sign
+    sign_mult <- if (sum_contrast$contrast[idx] == contrastA) 1 else -1
+    tibble(
+      Outcome = response,
+      Comparison = paste(g, "vs", referencegroup),
+      Slope_Ref = round(refstats$slope, 4),
+      Slope_Comp = round(compstats[[g]]$slope, 4),
+      Slope_Diff = round(sign_mult * sum_contrast$estimate[idx], 4),
+      Slope_SE = round(sum_contrast$SE[idx], 4),
+      Slope_Lower = round(sign_mult * sum_contrast$lower.CL[idx], 4),
+      Slope_Upper = round(sign_mult * sum_contrast$upper.CL[idx], 4),
+      Slope_p = round(sum_contrast$p.value[idx], 5),
+      Cohen_d = round(cohensd[g], 4),
+      Wald_p = round(wald_p, 5),
+      LRT_p = round(lrt_p, 5),
+      LRT_chi = round(lrt_chi, 3),
+      LRT_df = lrt_df,
+      ResidualSD = round(sigma_resid, 3)
+    )
+  } else {
+    tibble(
+      Outcome = response,
+      Comparison = paste(g, "vs", referencegroup),
+      Slope_Ref = NA, Slope_Comp = NA, Slope_Diff = NA,
+      Slope_SE = NA, Slope_Lower = NA, Slope_Upper = NA,
+      Slope_p = NA, Cohen_d = NA, Wald_p = NA,
+      LRT_p = NA, LRT_chi = NA, LRT_df = NA, ResidualSD = NA
+    )
+  }
+})
+  
+  modelsummary <- bind_rows(meta_rows)
+  list(
+    modelsummary = modelsummary,
+    mod_full = mod_full,
+    mod_noint = mod_noint,
+    lrt = lrt,
+    wald_p = wald_p,
+    slopes = sum_emt,
+    contrast = sum_contrast,
+    cohensd = cohensd
+  )
+}
+
+# --- List of Markers ---
+biavars <- c(
+  "MMSE", "SNSB_attention", "SNSB_language", "SNSB_visuospatial", "SNSB_memory", "SNSB_frontal",
+  "bmi", "whr", "pbcm", "pbf", "bmr", "ecw_tcw", "tbw_ffm", "PA50_total",
+  "ECW_ICW_upper", "ECW_ICW_lower", "Water_Lean_upper", "Water_Lean_lower",
+  "R_upper", "R_lower", "Xc_upper", "Xc_lower", "PA_upper", "PA_lower",
+  "R_H_upper", "R_H_lower", "Xc_H_upper", "Xc_H_lower"
+)
+
+# --- Batch Analysis ---
+results <- lapply(biavars, function(var) {
+  print(paste("Analyzing:", var))
+  analyze_longitudinal_trends_LRT(
+    data = df_long.analysis,
+    response = var,
+    groupvar = "Change_Type",
+    referencegroup = referencegroup,
+    comparisongroups = comparisongroups
+  )
+})
+modelsummarylist <- lapply(results, function(x) x$modelsummary)
+allsummaries <- bind_rows(modelsummarylist, .id = "Biomarker")
+write.csv(allsummaries, "Bioimpedance_LME_LRT_summary.csv", row.names = FALSE)
+
+print("Check complete: Output summary table written!")
+
+# --- Batch Plot Generation (Wald + LRT) ---
+output_dir_wald <- "Bioimpedance_Trajectory_WaldPlots"
+output_dir_lrt <- "Bioimpedance_Trajectory_LRTPlots"
+dir.create(output_dir_wald, showWarnings = FALSE)
+dir.create(output_dir_lrt, showWarnings = FALSE)
+plots_wald <- lapply(biavars, function(var)
+  plot_lmer_model_with_interaction_p(
+    data = df_long.analysis,
+    response = var,
+    colors = colors.legend
+  )
+)
+plots_lrt <- lapply(biavars, function(var)
+  plot_lmer_interaction_with_p(
+    data = df_long.analysis,
+    response = var,
+    colors = colors.legend,
+    show.legend = TRUE  # Change this to TRUE to show group legend
+  )
+)
+for (i in seq_along(biavars)) {
+  pw <- plots_wald[[i]]
+  pl <- plots_lrt[[i]]
+  if (inherits(pw, "ggplot")) {
+    ggsave(
+      filename = file.path(output_dir_wald, paste0(biavars[i], "_waldplot.png")),
+      plot = pw, width = 7, height = 5, dpi = 300
+    )
+  }
+  if (inherits(pl, "ggplot")) {
+    ggsave(
+      filename = file.path(output_dir_lrt, paste0(biavars[i], "_lrtplot.png")),
+      plot = pl, width = 7, height = 5, dpi = 300
+    )
+  }
+}
+
+# --- The Key Plot Function (only this part is new/changed!) ---
+plot_lmer_interaction_with_p <- function(data, response, colors, show.legend = TRUE) {
+  ggplot(data, aes(
+      x = elapsed_years,
+      y = .data[[response]],
+      color = Change_Type,
+      group = Change_Type
+  )) +
+    stat_summary(fun = mean, geom = "line", size = 1.1) +
+    scale_color_manual(values = colors) +
+    labs(
+      title = paste(response, "trajectory by group"),
+      color = "Group",
+      x = "elapsed_years",
+      y = response
+    ) +
+    theme_classic(base_size = 14) +
+    theme(
+      legend.position = if(show.legend) "top" else "none",
+      legend.title = element_text(size = 13),
+      legend.text = element_text(size = 12),
+      plot.title = element_text(hjust = 0.5)
+    )
+}
+
+
+```
+
+```{r}
 # --- Libraries ---
 library(lmerTest)
 library(emmeans)
