@@ -1,0 +1,586 @@
+---
+title: "Longitudinal trajectories of segmental bioimpedance and cognitive conversion in older adults"
+output: html_notebook
+---
+
+Longitudinal trajectories of segmental bioimpedance and cognitive conversion in older adults
+
+------------------------------------------------------------------------
+
+```{r}
+# Data manipulation
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(lubridate)
+library(stringr)
+
+# Visualization
+library(ggplot2)
+library(cowplot)
+library(ggpubr)
+library(patchwork)
+library(sjPlot)
+
+# Statistical analysis
+library(lme4)
+library(rstatix)
+library(effectsize)
+library(emmeans)
+library(broom)
+library(broom.mixed)
+
+# Reporting
+library(gtsummary)
+library(flextable)
+library(summarytools)
+library(tableone)
+library(effsize)
+library(scales)
+library(tidyverse)
+
+```
+
+```{r}
+df0 <- read.csv("Chosun5yoriginal.csv", stringsAsFactors = FALSE)
+df0$COGNITIVESTAT <- trimws(df0$COGNITIVESTAT)
+df0$COGNITIVESTAT <- gsub("[[:punct:]]", "", df0$COGNITIVESTAT)
+df0$COGNITIVESTAT <- gsub(" ", "", df0$COGNITIVESTAT)
+
+valid_states <- c("CN", "SMI", "aMCI", "naMCI", "AD")
+df0$COGNITIVESTAT <- ifelse(df0$COGNITIVESTAT %in% valid_states, df0$COGNITIVESTAT, NA)
+df0$diagnosis <- ifelse(df0$COGNITIVESTAT %in% c("CN", "SMI"), "CN",
+                    ifelse(df0$COGNITIVESTAT %in% c("aMCI", "naMCI"), "MCI",
+                      ifelse(df0$COGNITIVESTAT == "AD", "AD", NA)))
+
+vars_to_clean <- c("ApoeE4", "coldheat23Final", "coldheat23FinalStd", "SEX")
+
+for (var in vars_to_clean) {
+  df0[[var]] <- trimws(df0[[var]])                      
+  df0[[var]] <- gsub("[[:punct:]]", "", df0[[var]])     
+  df0[[var]] <- gsub(" ", "", df0[[var]])               
+}
+
+df0$mriPetVisualRating_raw <- df0$mriPetVisualRating
+
+df0$mriPetVisualRating_std <- trimws(df0$mriPetVisualRating_raw)
+df0$mriPetVisualRating_std <- gsub("[[:punct:]]", "", df0$mriPetVisualRating_std)
+df0$mriPetVisualRating_std <- gsub(" ", "", df0$mriPetVisualRating_std)
+
+df0$mriPetVisualRating_std <- tolower(df0$mriPetVisualRating_std)
+
+df0$MRIPET <- ifelse(
+  grepl("positive", df0$mriPetVisualRating_std) & grepl("negative", df0$mriPetVisualRating_std),
+  NA, # mixed → NA
+  ifelse(grepl("^positive+$|^pos+$|^p+$|\\+", df0$mriPetVisualRating_std),
+         "positive",
+         ifelse(grepl("^negative+$|^neg+$|^n+$|\\-", df0$mriPetVisualRating_std),
+                "negative",
+                ifelse(is.na(df0$mriPetVisualRating_std) | df0$mriPetVisualRating_std == "" |
+                       grepl("error|miss|notavailable|unknown", df0$mriPetVisualRating_std),
+                       NA, 
+                       ifelse(grepl("posit", df0$mriPetVisualRating_std), "positive", 
+                         ifelse(grepl("negat", df0$mriPetVisualRating_std), "negative", 
+                           NA 
+                         )
+                       )
+                )
+         )
+  )
+)
+
+df0$coldheat23Final_clean <- trimws(df0$coldheat23Final)
+df0$coldheat23Final_clean <- gsub("[[:punct:]]", "", df0$coldheat23Final_clean)
+df0$coldheat23Final_clean <- gsub(" ", "", df0$coldheat23Final_clean)
+
+df0$Cold_Heat_Pattern <- ifelse(
+  df0$coldheat23Final_clean == "1", "No cold-heat pattern",
+  ifelse(df0$coldheat23Final_clean == "2", "Cold pattern",
+    ifelse(df0$coldheat23Final_clean == "3", "Heat pattern",
+      ifelse(df0$coldheat23Final_clean == "4", "Mixed cold-heat pattern", NA)
+    )
+  )
+)
+
+
+table(df0$COGNITIVESTAT)
+table(df0$SEX)
+table(df0$ApoeE4)
+table(df0$MRIPET)
+table(df0$Cold_Heat_Pattern, useNA = "always")
+
+df <- df0 %>% select(
+  k_no, USUBJID, datetest,
+    ApoeE4, COGNITIVESTAT, diagnosis,
+    coldheat23Final, Cold_Heat_Pattern,
+    SEX, mriPetVisualRating, MRIPET, Remove, Remove_reasons, AGE, height, weight, EDUYR, 
+    gds, kdsq,
+    Waistcir, Hipcir, sysbp, diabp, bmi,
+    icwIntracellularWater, ecwExtracellularWater, tbwTotalBodyWater,
+    protein, mineral, fat, slmSoftLeanMass, ffmFatFreeMass, smmSkeletalMuscleMass,
+    pbf, whr,
+    sw_ra, sw_la, sw_tr, sw_rl, sw_ll,
+    ecw_tbw_total, ecw_tbw_ra, ecw_tbw_la, ecw_tbw_tr, ecw_tbw_rl, ecw_tbw_ll,
+    sl_ra, sl_la, sl_tr, sl_rl, sl_ll,
+    bfmControl, ffmControl, bcm, boneMineralContent, ac, amc, vfa, bmr, tbw_ffm,
+    ra_z1, la_z1, tr_z1, rl_z1, ll_z1,
+    ra_z5, la_z5, tr_z5, rl_z5, ll_z5,
+    ra_z50, la_z50, tr_z50, rl_z50, ll_z50,
+    ra_z250, la_z250, tr_z250, rl_z250, ll_z250,
+    ra_z500, la_z500, tr_z500, rl_z500, ll_z500,
+    ra_z1000, la_z1000, tr_z1000, rl_z1000, ll_z1000,
+    ra_xc5, la_xc5, tr_xc5, rl_xc5, ll_xc5, ra_xc50, la_xc50, tr_xc50, rl_xc50, ll_xc50,
+    ra_xc250, la_xc250, tr_xc250, rl_xc250, ll_xc250,
+    ra_pa5, la_pa5, tr_pa5, rl_pa5, ll_pa5,
+    ra_pa50, la_pa50, tr_pa50, rl_pa50, ll_pa50,
+    ra_pa250, la_pa250, tr_pa250, rl_pa250, ll_pa250,
+    PA50_total, smi,
+    MMSE, SNSB_attention, SNSB_language, SNSB_visuospatial, SNSB_memory, SNSB_frontal
+  )
+
+df <- df %>%
+  mutate(
+    ra_r5   = sqrt(ra_z5^2   - ra_xc5^2),
+    ra_r50  = sqrt(ra_z50^2  - ra_xc50^2),
+    ra_r250 = sqrt(ra_z250^2 - ra_xc250^2),
+    la_r5   = sqrt(la_z5^2   - la_xc5^2),
+    la_r50  = sqrt(la_z50^2  - la_xc50^2),
+    la_r250 = sqrt(la_z250^2 - la_xc250^2),
+    tr_r5   = sqrt(tr_z5^2   - tr_xc5^2),
+    tr_r50  = sqrt(tr_z50^2  - tr_xc50^2),
+    tr_r250 = sqrt(tr_z250^2 - tr_xc250^2),
+    rl_r5   = sqrt(rl_z5^2   - rl_xc5^2),
+    rl_r50  = sqrt(rl_z50^2  - rl_xc50^2),
+    rl_r250 = sqrt(rl_z250^2 - rl_xc250^2),
+    ll_r5   = sqrt(ll_z5^2   - ll_xc5^2),
+    ll_r50  = sqrt(ll_z50^2  - ll_xc50^2),
+    ll_r250 = sqrt(ll_z250^2 - ll_xc250^2)
+  )
+
+df3 <- df %>% 
+  select(
+    k_no, 
+    ra_z5, ra_z50, ra_z250,
+    la_z5, la_z50, la_z250,
+    tr_z5, tr_z50, tr_z250,
+    rl_z5, rl_z50, rl_z250,
+    ll_z5, ll_z50, ll_z250,
+    ra_xc5, la_xc5, tr_xc5, rl_xc5, ll_xc5,
+    ra_xc50, la_xc50, tr_xc50, rl_xc50, ll_xc50,
+    ra_xc250, la_xc250, tr_xc250, rl_xc250, ll_xc250,
+    ra_r5, ra_r50, ra_r250,
+    la_r5, la_r50, la_r250,
+    tr_r5, tr_r50, tr_r250,
+    rl_r5, rl_r50, rl_r250,
+    ll_r5, ll_r50, ll_r250
+  )
+
+head(df, 10)
+
+#write.csv(df, "df.csv", row.names = FALSE)
+#write.csv(df3, "df3.csv", row.names = FALSE)
+```
+
+```{r}
+imp <- df3 %>% select(k_no, ra_z5:ll_z250)
+
+imp.t <- as.data.frame(t(imp))
+
+colnames(imp.t) <- imp.t[1, ]
+imp.t <- imp.t[-1, ] 
+
+imp.t$ID <- row.names(imp.t)
+
+z_types <- c("ra_z5", "ra_z50", "ra_z250",
+             "la_z5", "la_z50", "la_z250",
+             "tr_z5", "tr_z50", "tr_z250",
+             "rl_z5", "rl_z50", "rl_z250",
+             "ll_z5", "ll_z50", "ll_z250")
+
+imp.t <- imp.t %>% 
+  mutate(ID = factor(ID, levels = z_types)) %>%
+  arrange(ID)
+
+imp.t.list <- list(
+  imp.t %>% slice(1:3),
+  imp.t %>% slice(4:6),
+  imp.t %>% slice(7:9),
+  imp.t %>% slice(10:12),
+  imp.t %>% slice(13:15)
+)
+
+get_bad_list <- function(dt) {
+  dt <- as.data.frame(dt) %>% select(-ID)
+  dt[] <- lapply(dt, function(x) as.numeric(x))
+  colnames(imp.t)[which(sapply(dt, function(x) any(diff(x) > 0)))]
+}
+
+imp.lst <- unique(unlist(lapply(imp.t.list, get_bad_list)))
+
+res <- df3 %>% select(k_no, ra_r5:ll_r250)
+
+res.t <- as.data.frame(t(res))
+
+colnames(res.t) <- res.t[1, ]
+res.t <- res.t[-1, ]
+res.t$ID <- row.names(res.t)
+
+r_types <- c("ra_r5", "ra_r50", "ra_r250",
+             "la_r5", "la_r50", "la_r250",
+             "tr_r5", "tr_r50", "tr_r250",
+             "rl_r5", "rl_r50", "rl_r250",
+             "ll_r5", "ll_r50", "ll_r250")
+
+res.t <- res.t %>%
+  mutate(ID = factor(ID, levels = r_types)) %>%
+  arrange(ID)
+
+res.t.list <- list(
+  res.t %>% slice(1:3),
+  res.t %>% slice(4:6),
+  res.t %>% slice(7:9),
+  res.t %>% slice(10:12),
+  res.t %>% slice(13:15)
+)
+
+res.lst <- unique(unlist(lapply(res.t.list, get_bad_list)))
+
+df3_clean <- df3 %>% filter(!(k_no %in% c(imp.lst, res.lst)))
+
+cat("Có", length(imp.lst), "mẫu lỗi trên z\n")
+cat("Có", length(res.lst), "mẫu lỗi trên r\n")
+cat("Số mẫu còn lại ở df3_clean là:", nrow(df3_clean), "\n")
+
+library(dplyr)
+library(stringr)
+
+factor_vars <- c("ApoeE4", "COGNITIVESTAT", "diagnosis", "coldheat23Final", 
+                 "Cold_Heat_Pattern", "SEX", "mriPetVisualRating", 
+                 "MRIPET", "Remove", "Remove_reasons")
+
+numeric_vars <- c("AGE", "height", "weight", "EDUYR", "gds", "kdsq", 
+                  "Waistcir", "Hipcir", "sysbp", "diabp", "bmi", 
+                  "icwIntracellularWater", "ecwExtracellularWater", 
+                  "tbwTotalBodyWater", "protein", "mineral", "fat", 
+                  "slmSoftLeanMass", "ffmFatFreeMass", "smmSkeletalMuscleMass", 
+                  "pbf", "whr", "sw_ra", "sw_la", "sw_tr", "sw_rl",  
+                  "sw_ll", "ecw_tbw_total", "ecw_tbw_ra", "ecw_tbw_la", 
+                  "ecw_tbw_tr", "ecw_tbw_rl", "ecw_tbw_ll", "sl_ra", 
+                  "sl_la", "sl_tr", "sl_rl", "sl_ll", "bfmControl", 
+                  "ffmControl", "bcm", "boneMineralContent", "ac", "amc", 
+                  "vfa", "bmr", "tbw_ffm", "ra_z1", "la_z1", "tr_z1", "rl_z1", 
+                  "ll_z1", "ra_z5", "la_z5", "tr_z5", "rl_z5", "ll_z5", 
+                  "ra_z50", "la_z50", "tr_z50", "rl_z50", "ll_z50", 
+                  "ra_z250", "la_z250", "tr_z250", "rl_z250", "ll_z250", 
+                  "ra_z500", "la_z500", "tr_z500", "rl_z500", "ll_z500", 
+                  "ra_z1000", "la_z1000", "tr_z1000", "rl_z1000", "ll_z1000", 
+                  "ra_xc5", "la_xc5", "tr_xc5", "rl_xc5", "ll_xc5", 
+                  "ra_xc50", "la_xc50", "tr_xc50", "rl_xc50", "ll_xc50", 
+                  "ra_xc250", "la_xc250", "tr_xc250", "rl_xc250", "ll_xc250", 
+                  "ra_pa5", "la_pa5", "tr_pa5", "rl_pa5", "ll_pa5", 
+                  "ra_pa50", "la_pa50", "tr_pa50", "rl_pa50", "ll_pa50", 
+                  "ra_pa250", "la_pa250", "tr_pa250", "rl_pa250", "ll_pa250", 
+                  "PA50_total", "smi", "MMSE", 
+                  "SNSB_attention", "SNSB_language", "SNSB_visuospatial", "SNSB_memory", "SNSB_frontal"
+)
+
+clean_numeric <- function(x) {
+  x <- as.character(x)
+  x[x %in% c("", "NA", "N/A", "unknown", "--", "Không rõ", "missing", ".", "..")] <- NA
+  as.numeric(x)
+}
+
+df <- df %>%
+  mutate(across(all_of(numeric_vars), clean_numeric))       
+
+df <- df %>%
+  mutate(across(all_of(factor_vars), as.factor))            
+
+df <- df %>%
+  mutate(
+    pbcm = bcm / weight * 100,
+    ecw_tbw = ecw_tbw_total * 100,
+    Water_Lean_RA = sw_ra / sl_ra,
+    Water_Lean_LA = sw_la / sl_la,
+    Water_Lean_RL = sw_rl / sl_rl,
+    Water_Lean_LL = sw_ll / sl_ll,
+    ECW_ICW_RA = ecw_tbw_ra / (1 - ecw_tbw_ra),
+    ECW_ICW_LA = ecw_tbw_la / (1 - ecw_tbw_la),
+    ECW_ICW_RL = ecw_tbw_rl / (1 - ecw_tbw_rl),
+    ECW_ICW_LL = ecw_tbw_ll / (1 - ecw_tbw_ll),   
+    SW_upper = (sw_ra + sw_la) / 2,
+    SW_lower = (sw_rl + sw_ll) / 2,
+    SL_upper = (sl_ra + sl_la) / 2,
+    SL_lower = (sl_rl + sl_ll) / 2,
+    Water_Lean_upper = (sw_ra + sw_la) / (sl_ra + sl_la),
+    Water_Lean_lower = (sw_rl + sw_ll) / (sl_rl + sl_ll),
+    ECW_ICW_upper = (ECW_ICW_RA + ECW_ICW_LA) / 2,
+    ECW_ICW_lower = (ECW_ICW_RL + ECW_ICW_LL) / 2,
+    # New variables from segmental ECW/TBW
+    ECW_TBW_upper = (ecw_tbw_ra + ecw_tbw_la) / 2,
+    ECW_TBW_lower = (ecw_tbw_rl + ecw_tbw_ll) / 2,
+    R_upper = (ra_r50 + la_r50) / 2,
+    R_lower = (rl_r50 + ll_r50) / 2,
+    Xc_upper = (ra_xc50 + la_xc50) / 2,
+    Xc_lower = (rl_xc50 + ll_xc50) / 2,
+    PA_upper = (ra_pa50 + la_pa50) / 2,
+    PA_lower = (rl_pa50 + ll_pa50) / 2,
+    # Segmental variables other frequencies
+    R5_upper = (ra_z5 + la_z5) / 2,
+    R5_lower = (rl_z5 + ll_z5) / 2,
+    R250_upper = (ra_z250 + la_z250) / 2,
+    R250_lower = (rl_z250 + ll_z250) / 2,
+    Xc5_upper = (ra_xc5 + la_xc5) / 2,
+    Xc5_lower = (rl_xc5 + ll_xc5) / 2,
+    Xc250_upper = (ra_xc250 + la_xc250) / 2,
+    Xc250_lower = (rl_xc250 + ll_xc250) / 2,
+    z1_upper = (ra_z1 + la_z1) / 2,
+    z1_lower = (rl_z1 + ll_z1) / 2,
+    z5_upper = (ra_z5 + la_z5) / 2,
+    z5_lower = (rl_z5 + ll_z5) / 2,
+    z50_upper = (ra_z50 + la_z50) / 2,
+    z50_lower = (rl_z50 + ll_z50) / 2,
+    z250_upper = (ra_z250 + la_z250) / 2,
+    z250_lower = (rl_z250 + ll_z250) / 2,
+    z500_upper = (ra_z500 + la_z500) / 2,
+    z500_lower = (rl_z500 + ll_z500) / 2,
+    z1000_upper = (ra_z1000 + la_z1000) / 2,
+    z1000_lower = (rl_z1000 + ll_z1000) / 2,
+    PA5_upper = (ra_pa5 + la_pa5) / 2,
+    PA5_lower = (rl_pa5 + ll_pa5) / 2,
+    PA250_upper = (ra_pa250 + la_pa250) / 2,
+    PA250_lower = (rl_pa250 + ll_pa250) / 2,
+    SEX = recode(SEX, "M" = "Male", "F" = "Female")
+  ) %>%
+  rename(
+    icw = icwIntracellularWater,
+    ecw = ecwExtracellularWater,
+    tbw = tbwTotalBodyWater,
+    slm = slmSoftLeanMass,
+    ffm = ffmFatFreeMass,
+    smm = smmSkeletalMuscleMass,
+    SW_tr = sw_tr,
+    SL_tr = sl_tr
+  )
+
+df <- df %>%
+  filter(AGE >= 55) %>%
+  filter(diagnosis %in% c("CN", "MCI", "AD")) %>%
+  filter(!(k_no %in% c(imp.lst, "G_26", "G_30", "a_407", "a_432"))) %>%
+  droplevels()
+
+df <- df %>%
+  mutate(
+    EDUYR = ifelse(EDUYR %in% c(99, 999, NA), 9, EDUYR),
+    # Ghi đè các giá trị bất hợp lý của bmi
+    bmi = ifelse(bmi < 10 | bmi > 45, NA, bmi),
+    # Ghi đè các giá trị bất hợp lý của whr
+    whr = ifelse(whr > 1, NA, whr),
+    # Ghi đè các giá trị bất hợp lý của tbw_ffm
+    tbw_ffm = ifelse(tbw_ffm > 74.65, NA, tbw_ffm)
+  ) %>%
+  mutate(
+    # Tính lại bmi nếu bị thiếu và có height/weight hợp lệ
+    bmi = ifelse(
+      is.na(bmi) & !is.na(height) & !is.na(weight) & height > 0,
+      weight / ((height/100)^2),
+      bmi
+    ),
+    # Tính lại whr nếu bị thiếu và có số đo vòng eo/mông hợp lệ
+    whr = ifelse(
+      is.na(whr) & !is.na(Waistcir) & !is.na(Hipcir) & Hipcir > 0,
+      Waistcir / Hipcir,
+      whr
+    ),
+    # Tính lại tbw_ffm nếu bị thiếu và có tbwTotalBodyWater, ffmFatFreeMass hợp lệ
+    tbw_ffm = ifelse(
+      is.na(tbw_ffm) & !is.na(tbw) & !is.na(ffm) & ffm > 0,
+      tbw / ffm * 100,
+      tbw_ffm
+    )
+  )
+
+
+#write.csv(df, "df.csv", row.names = FALSE)
+
+# 1. Load thư viện cần thiết
+library(dplyr)
+library(mice)
+
+# 2. Định nghĩa danh sách 6 biến nhận thức cần imputing
+cog_vars <- c("MMSE", 
+              "SNSB_attention", "SNSB_language", 
+              "SNSB_visuospatial", "SNSB_memory", "SNSB_frontal")
+
+# 3. Lấy các biến cần thiết từ df
+df_cog <- df %>%
+  select(k_no, diagnosis, all_of(cog_vars))
+
+# 4. Kiểm tra missing trên từng biến (in ra tỷ lệ %)
+cat("Tỷ lệ % missing trên từng biến nhận thức:\n")
+print(sapply(df_cog[cog_vars], function(x) round(sum(is.na(x))/length(x)*100, 2)))
+
+# 5. Chia theo nhóm diagnosis (CN, MCI, AD) để impute theo nhóm, tăng hợp lý sinh học
+df_cog_split <- split(df_cog, df_cog$diagnosis)
+
+# 6. Định nghĩa hàm imputing MICE-PMM cho đồng thời nhiều biến nhận thức
+pmm_mice <- function(subdf){
+  imp_vars <- subdf %>% select(all_of(cog_vars))
+  # Chỉ impute nếu có missing
+  if(any(is.na(imp_vars))){
+    imp <- mice(imp_vars, m=5, maxit=5, method='pmm', seed=500, printFlag=FALSE)
+    imped_vars_completed <- complete(imp, 5)
+    # Ghép lại với các cột ID/group (k_no, diagnosis) theo thứ tự
+    subdf[, cog_vars] <- imped_vars_completed
+  }
+  return(subdf)
+}
+
+# 7. Áp dụng imputation trên từng nhóm diagnosis
+imputed_list <- lapply(df_cog_split, pmm_mice)
+df_cog_imputed <- bind_rows(imputed_list)
+
+# 8. Ghép dữ liệu đã impute về các biến nhận thức trở lại bảng df gốc (các cột khác giữ nguyên giá trị ban đầu)
+df_imputed <- df %>%
+  select(-any_of(cog_vars)) %>%
+  left_join(df_cog_imputed %>% select(k_no, diagnosis, all_of(cog_vars)),
+            by = c("k_no", "diagnosis"))
+
+# 9. Kiểm tra lại các biến nhận thức còn thiếu không
+cat("Số lượng NA còn lại trên từng biến nhận thức sau impute:\n")
+print(sapply(df_imputed[cog_vars], function(x) sum(is.na(x))))
+
+
+
+# 10. Xuất file kết quả
+#write.csv(df_imputed, "chosun5y_imputed_6cog.csv", row.names=FALSE)
+
+```
+```{r}
+# Kiểm tra và báo cáo các biến còn thiếu giá trị trong df_imputed
+
+# 1. Đếm số lượng NA trên từng biến
+na_counts <- sapply(df_imputed, function(x) sum(is.na(x)))
+
+# 2. Tổng số dòng (số record)
+n_total <- nrow(df_imputed)
+
+# 3. Tính tỷ lệ phần trăm missing
+na_percent <- round(na_counts / n_total * 100, 2)
+
+# 4. Tạo bảng tổng hợp báo cáo
+missing_report <- data.frame(
+  Variable = names(df_imputed),
+  Missing_Count = na_counts,
+  Missing_Percent = na_percent
+)
+
+# 5. Chỉ in ra các biến có thiếu (Missing_Count > 0)
+missing_report_nonzero <- missing_report %>% filter(Missing_Count > 0)
+
+print("Các biến còn thiếu giá trị (Missing):")
+print(missing_report_nonzero)
+
+# --- Tùy chọn: Xuất file report các biến còn missing
+#write.csv(missing_report_nonzero, "missing_variables_in_df_imputed.csv", row.names = FALSE)
+
+```
+```
+
+```
+
+```{r}
+# ----------- 2a. Nâng cấp làm sạch diagnosis và các biến nhãn -----------
+
+label_clean <- function(x) {
+  x <- tolower(x)
+  x <- stringr::str_trim(x)
+  x <- stringr::str_replace_all(x, "[[:punct:]]", "")
+  x <- stringr::str_replace_all(x, " ", "")
+  x
+}
+
+# Áp dụng cho diagnosis và các nhãn categorical quan trọng
+label_vars <- c("COGNITIVESTAT", "diagnosis", "SEX", "ApoeE4")
+df0[label_vars] <- lapply(df0[label_vars], label_clean)
+
+# Chuẩn hóa diagnosis mapping
+# Thêm tất cả khả năng spelling/case về các nhóm chính
+df0$diagnosis_std <- dplyr::case_when(
+  df0$COGNITIVESTAT %in% c("cn","smi")         ~ "CN",
+  df0$COGNITIVESTAT %in% c("amci","namci")     ~ "MCI",
+  df0$COGNITIVESTAT == "ad"                    ~ "AD",
+  TRUE                                         ~ NA_character_
+)
+# Nếu cần vẫn giữ diagnosis cũ để check sau này
+df0$diagnosis_raw <- df0$diagnosis
+
+# Tiếp tục các xử lý khác dựa trên df0$diagnosis_std thay vì diagnosis gốc
+
+# ----------- (e) Flag outlier giữ dataset đầy đủ và dataset sạch -----------
+
+# Gán outlier flag (sử dụng giống đoạn script bạn đang làm, nhưng chỉ gắn cờ thay vì filter loại khỏi dataset):
+vars_check_outlier <- c(
+  "AGE","bmi", "whr", "pbcm", "pbf", "bmr", "icw", "ecw", "tbw", "protein", "smm", "amc",
+  "R_upper", "R_lower", "Xc_upper", "Xc_lower", "PA_upper", "PA_lower",
+  "SW_upper", "SW_lower", "SL_upper", "SL_lower","sw_tr", "sl_tr",
+  "R5_upper", "R5_lower",
+  "Xc5_upper", "Xc5_lower", "z1_upper", "z1_lower", "z5_upper", "z5_lower"
+)
+vars_exist <- vars_check_outlier[vars_check_outlier %in% names(df)]
+
+zscore_func <- function(x) (x - mean(x, na.rm=TRUE)) / sd(x, na.rm=TRUE)
+df <- df %>%
+  mutate(across(all_of(vars_exist), zscore_func, .names = "{.col}_z"))
+
+# Flag outlier
+df <- df %>%
+  mutate(outlier_extreme = ifelse(rowSums(across(ends_with("_z"), ~abs(.) > 3), na.rm = TRUE) > 0, 1, 0)) # 1: outlier, 0: clean
+
+# Dataframe đầy đủ (có flag)
+df_full <- df
+
+# Dataframe đã loại outlier
+df_clean <- df_full %>% filter(outlier_extreme == 0)
+
+# Lưu 2 version:
+write.csv(df_full, "Chosun5y_BIApreprocess_full_with_outlier_flag.csv", row.names=FALSE)
+write.csv(df_clean, "Chosun5y_BIApreprocess_clean.csv", row.names=FALSE)
+
+# ---------- Báo cáo tổng hợp/chất lượng mẫu ----------
+cat("TỔNG HỢP SỐ LƯỢNG CASE:\n")
+cat("Tổng số subject (full):", length(unique(df_full$USUBJID)), "\n")
+cat("Tổng số subject (clean):", length(unique(df_clean$USUBJID)), "\n")
+cat("Số đo trung bình mỗi subject (full):", round(nrow(df_full)/length(unique(df_full$USUBJID)),2), "\n")
+cat("Số đo trung bình mỗi subject (clean):", round(nrow(df_clean)/length(unique(df_clean$USUBJID)),2), "\n")
+cat("Tỷ lệ còn missing trên từng biến chính (full):\n")
+vars_main <- c("MMSE","SNSB_attention","SNSB_language","bmi","whr","PA50_total")
+print(sapply(df_full[vars_main], function(x) sum(is.na(x))/length(x)*100))
+cat("Tỷ lệ còn missing trên từng biến chính (clean):\n")
+print(sapply(df_clean[vars_main], function(x) sum(is.na(x))/length(x)*100))
+
+# ---------- Xuất danh sách outlier detail và biến thiếu ----------
+# file outlier
+outlier_rows <- df_full %>% filter(outlier_extreme == 1)
+outlier_info <- outlier_rows %>%
+  rowwise() %>%
+  mutate(
+    outlier_vars = paste(
+      vars_exist[unlist(across(all_of(paste0(vars_exist, "_z")), ~abs(.) > 3))],
+      collapse = ", "
+    ),
+    max_zscore = max(unlist(across(ends_with("_z"))), na.rm = TRUE)
+  ) %>%
+  ungroup()
+write.csv(outlier_info, "outlier_cases_detail_LOG.csv", row.names=FALSE)
+
+# file missing
+missing_report_nonzero <- sapply(df_full, function(x) sum(is.na(x)))
+missing_report_nonzero <- data.frame(Variable=names(missing_report_nonzero), Missing_Count=missing_report_nonzero)
+missing_report_nonzero <- missing_report_nonzero %>% dplyr::filter(Missing_Count > 0)
+write.csv(missing_report_nonzero, "missing_cases_report_LOG.csv", row.names=FALSE)
+
+
+
+
+```
