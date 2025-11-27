@@ -43,7 +43,8 @@ library(tidyverse)
 
 ```{r}
 df <- read.csv("Chosun5y_BIApreprocess_clean.csv", stringsAsFactors = FALSE)
-remove_list <- c("E_237", "F_242", "a_531", "E_391", "G_31", "F_385", "a_281") #9962 "K_368" , 5971 "G_71"
+remove_list <- c("E_237", "F_242", "a_531", "E_391", "G_31", "F_385", "a_281", "G_71", "F_333") #CNtransitMCI 9962 "K_368" , 5971 "G_71"
+#StableCN 11458 "F_333" , 10014 "E_346", 10851 "F_264"
 
 df <- df %>% filter(!(k_no %in% remove_list))
 
@@ -509,6 +510,7 @@ cat("Batch plotting complete!\n")
 
 library(dplyr)
 
+#Transit Check
 var_name <- "Xc_lower"
 
 df_change_CNtransitMCI <- df_long.analysis %>%
@@ -525,6 +527,22 @@ df_change_CNtransitMCI <- df_long.analysis %>%
 write.csv(df_change_CNtransitMCI, sprintf("ChangeTable_Variable_%s_CNtransitMCI_long.csv", var_name), row.names = FALSE)
 cat(sprintf("Done! CSVs saved for variable %s\n", var_name))
 
+#Stable Check
+var_name <- "protein"
+
+df_change_StableCN <- df_long.analysis %>%
+  filter(Change_Type == "StableCN") %>%
+  select(USUBJID, k_no, elapsed_years, all_of(var_name)) %>%
+  arrange(USUBJID, elapsed_years) %>%
+  group_by(USUBJID) %>%
+  mutate(
+    Difference = !!sym(var_name) - lag(!!sym(var_name)),
+    Year_Diff = elapsed_years - lag(elapsed_years)
+  ) %>%
+  ungroup()
+
+write.csv(df_change_StableCN, sprintf("ChangeTable_Variable_%s_StableCN_long.csv", var_name), row.names = FALSE)
+cat(sprintf("Done! CSVs saved for variable %s\n", var_name))
 ```
 
 ```{r}
