@@ -179,9 +179,9 @@ head(df, 10)
 
 #write.csv(df, "df.csv", row.names = FALSE)
 #write.csv(df3, "df3.csv", row.names = FALSE)
-```
 
-```{r}
+
+
 imp <- df3 %>% select(k_no, ra_z5:ll_z250)
 
 imp.t <- as.data.frame(t(imp))
@@ -455,8 +455,7 @@ print(sapply(df_imputed[cog_vars], function(x) sum(is.na(x))))
 # 10. Xuất file kết quả
 #write.csv(df_imputed, "chosun5y_imputed_6cog.csv", row.names=FALSE)
 
-```
-```{r}
+
 # Kiểm tra và báo cáo các biến còn thiếu giá trị trong df_imputed
 
 # 1. Đếm số lượng NA trên từng biến
@@ -483,9 +482,6 @@ print(missing_report_nonzero)
 
 # --- Tùy chọn: Xuất file report các biến còn missing
 #write.csv(missing_report_nonzero, "missing_variables_in_df_imputed.csv", row.names = FALSE)
-
-```
-```
 
 ```
 
@@ -578,9 +574,24 @@ write.csv(outlier_info, "outlier_cases_detail_LOG.csv", row.names=FALSE)
 missing_report_nonzero <- sapply(df_full, function(x) sum(is.na(x)))
 missing_report_nonzero <- data.frame(Variable=names(missing_report_nonzero), Missing_Count=missing_report_nonzero)
 missing_report_nonzero <- missing_report_nonzero %>% dplyr::filter(Missing_Count > 0)
-write.csv(missing_report_nonzero, "missing_cases_report_LOG.csv", row.names=FALSE)
+#write.csv(missing_report_nonzero, "missing_cases_report_LOG.csv", row.names=FALSE)
 
+# ---------- Báo cáo số lần mỗi biến xuất hiện trong outlier_vars (in ra console) ----------
 
+if (nrow(outlier_info) == 0) {
+  cat("Không có outlier nào (theo ngưỡng |z| > 3).\n")
+} else {
+  # Tách các tên biến trong outlier_vars thành vector
+  outlier_var_vec <- strsplit(outlier_info$outlier_vars, split = ",\\s*")
+  outlier_var_vec <- unlist(outlier_var_vec)
+  outlier_var_vec <- outlier_var_vec[outlier_var_vec != ""]  # bỏ chuỗi rỗng nếu có
+  
+  # Đếm tần suất từng biến
+  outlier_counts <- sort(table(outlier_var_vec), decreasing = TRUE)
+  
+  cat("\nSỐ LẦN MỖI BIẾN BỊ FLAG LÀ OUTLIER (|z| > 3):\n")
+  print(outlier_counts)
+}
 
 
 ```

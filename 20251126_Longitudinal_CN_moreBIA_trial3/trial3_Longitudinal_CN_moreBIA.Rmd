@@ -112,9 +112,7 @@ participant_group_summary <- df4 %>%
 
 print(participant_group_summary)
 
-```
 
-```{r}
 # ---- Libraries ----
 library(dplyr)
 library(tableone)

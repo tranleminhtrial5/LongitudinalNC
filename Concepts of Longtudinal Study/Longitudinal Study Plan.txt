@@ -16,3 +16,50 @@ Góc nhìn triển khai bằng R
 Trong R, các mô hình hỗn hợp dọc (ví dụ cho BIA và điểm nhận thức) thường được cài đặt bằng các gói như lme4 hoặc nlme, tương ứng với cách tiếp cận hỗn hợp được sử dụng rộng rãi trong các nghiên cứu dọc về biomarker và suy giảm nhận thức.​
 
 Mô hình sống còn và mô hình tiên lượng chuyển dạng (Cox, ROC phụ thuộc thời gian, mô hình học máy tích hợp BIA với biomarker khác) có thể được hiện thực bằng survival, timeROC và các khung ML như caret, tidymodels, randomForest, xgboost, phản ánh các hướng tiếp cận dự đoán đa phương thức gần đây ở MCI và giai đoạn sớm của AD.
+
+
+#My new Workflow:
+C. Longitudinal Mixed Effects Modeling (LME)
+For each marker:
+Fit model:marker ~ elapsed_years * Change_Type + AGE + SEX + EDUYR + (1 + elapsed_years | USUBJID)
+Use lmerTest::lmer() for fits
+lapply() for batch over bia_vars
+Store fit objects and summaries for downstream reporting
+
+D. Model Reporting & Visualization—Per Variable
+Trajectory Visualization
+Use plot_lmer_model_with_interaction_p and plot_lmer_interaction_with_p
+plot_lmer_model_with_interaction_p: displays group trajectories, Wald test p-values
+plot_lmer_interaction_with_p: displays full/reduced model comparison with LRT p-value for interaction
+Slope Extraction & Comparison
+Use analyze_longitudinal_trends to extract annual slopes, SEs, Wald p-values, Cohen’s d
+Plotting Slope Differences & Significance
+Use plot_slopes, plot_pvalues for marker-wise slope and significance visualization
+
+E. Confirmatory Inference— PRIORITIZE LRT
+Likelihood Ratio Test (Main)
+Compare full model to reduced (no interaction term): anova(reduced, full)
+Report χ², p-value for interaction term (elapsed_years × Change_Type)
+Prefer LRT as main test for statistical inference due to sample size concerns
+Wald Test (Secondary, Descriptive)
+Extract and report Wald test p-values for each model parameter via summary(model)$coefficients
+Use for descriptive interpretation
+Effect Size
+Calculate standardized slope difference (Cohen’s d):
+(slopeCNtransitMCI−slopeStableCN)/Residual SD
+Enhances clinical/biological interpretability
+
+F. (Future/Post-hoc Expansion)
+If more groups are added (e.g. "Reverted"), use emmeans for pairwise slope comparisons and multiple testing correction
+
+G. Model Diagnostics
+For each model:
+Residual QQ plots, fitted vs residuals
+Check random effects variance (diagnose convergence/warnings)
+Summarize model statistics (AIC, BIC, marginal/conditional R²)
+
+H. Summary Export
+Tables
+Annual slope by group, p-value (LRT + Wald), effect size, 95% CI, exported as .csv/.xlsx
+Visual Outputs
+Save spaghetti, trajectory, slope, and p-value plots for publication/self-archiving
